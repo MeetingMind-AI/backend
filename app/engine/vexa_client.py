@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.models import Meeting, TranscriptChunk
@@ -108,8 +108,46 @@ def _message_from_raw(raw_message: str | bytes) -> dict[str, Any] | None:
     return message
 
 
-def _segment_identity(timestamp: datetime, speaker: str, text: str) -> tuple[str, str, str]:
-    return (timestamp.isoformat(), speaker, text)
+def _parse_optional_iso_datetime(value: str) -> datetime | None:
+    normalized = value.strip().replace("Z", "+00:00")
+    if not normalized:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _should_replace_transcript_segment(
+    existing_segment: dict[str, Any] | None,
+    incoming_segment: dict[str, Any],
+) -> bool:
+    incoming_text = str(incoming_segment.get("text", "")).strip()
+    if not incoming_text:
+        return False
+
+    if existing_segment is None:
+        return True
+
+    existing_text = str(existing_segment.get("text", "")).strip()
+    incoming_updated_at = _parse_optional_iso_datetime(str(incoming_segment.get("updated_at") or ""))
+    existing_updated_at = _parse_optional_iso_datetime(str(existing_segment.get("updated_at") or ""))
+
+    if incoming_updated_at and existing_updated_at:
+        if incoming_updated_at > existing_updated_at:
+            return True
+        if incoming_updated_at < existing_updated_at:
+            return False
+
+    if existing_text.endswith("...") and not incoming_text.endswith("..."):
+        return True
+
+    return len(incoming_text) >= len(existing_text)
 
 
 def _word_count(text: str) -> int:
@@ -120,11 +158,32 @@ def _is_meaningful_realtime_text(text: str) -> bool:
     return _word_count(text.strip()) >= REALTIME_MIN_WORDS
 
 
+def _should_log_transcript_update(
+    is_immutable: bool,
+    text: str,
+    previous_logged_text: str,
+) -> bool:
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        return False
+    if cleaned_text == previous_logged_text:
+        return False
+
+    if is_immutable:
+        return True
+
+    if _word_count(cleaned_text) < REALTIME_MIN_WORDS:
+        return False
+
+    if previous_logged_text and len(cleaned_text) <= len(previous_logged_text):
+        return False
+
+    return True
+
+
 def _log_transcript_line(meeting_id: int, speaker: str, text: str, is_immutable: bool) -> None:
     phase = "final" if is_immutable else "live"
     compact_text = " ".join(text.split())
-    if len(compact_text) > 280:
-        compact_text = f"{compact_text[:277]}..."
     print(f"[Vexa Transcript] meeting={meeting_id} phase={phase} speaker={speaker}: {compact_text}")
 
 
@@ -156,13 +215,13 @@ async def _finalize_completed_meeting(
     started = time.monotonic()
 
     try:
-        inserted = await sync_final_transcript_from_vexa(
+        upserted = await sync_final_transcript_from_vexa(
             meeting_id=meeting_id,
             platform=platform,
             native_id=native_id,
             api_key=api_key,
         )
-        print(f"[Vexa] Final transcript sync for meeting {meeting_id} inserted {inserted} chunks")
+        print(f"[Vexa] Final transcript sync for meeting {meeting_id} upserted {upserted} chunks")
         await _generate_and_log_final_report(controller, meeting_id)
     finally:
         progress_done.set()
@@ -272,6 +331,27 @@ async def sync_final_transcript_from_vexa(
     if not isinstance(segments, list):
         return 0
 
+    canonical_segments_by_abs_start: dict[str, dict[str, Any]] = {}
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+
+        absolute_start_time = str(segment.get("absolute_start_time", "")).strip()
+        if not absolute_start_time:
+            continue
+
+        existing = canonical_segments_by_abs_start.get(absolute_start_time)
+        if _should_replace_transcript_segment(existing, segment):
+            canonical_segments_by_abs_start[absolute_start_time] = segment
+
+    if not canonical_segments_by_abs_start:
+        return 0
+
+    canonical_segments = [
+        canonical_segments_by_abs_start[key]
+        for key in sorted(canonical_segments_by_abs_start.keys())
+    ]
+
     inserted_count = 0
 
     with SessionLocal() as db:
@@ -280,29 +360,9 @@ async def sync_final_transcript_from_vexa(
             print(f"[Vexa] Local meeting {meeting_id} not found during final transcript sync")
             return 0
 
-        existing_rows = db.execute(
-            select(TranscriptChunk.timestamp, TranscriptChunk.speaker, TranscriptChunk.text).where(
-                TranscriptChunk.meeting_id == meeting_id
-            )
-        ).all()
-        existing_keys: set[tuple[str, str, str]] = set()
+        db.execute(delete(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id))
 
-        for timestamp_value, speaker_value, text_value in existing_rows:
-            if isinstance(timestamp_value, datetime):
-                timestamp = timestamp_value
-            else:
-                timestamp = _parse_absolute_start_time(str(timestamp_value))
-
-            speaker = str(speaker_value or "Unknown").strip() or "Unknown"
-            text = str(text_value or "").strip()
-            if not text:
-                continue
-            existing_keys.add(_segment_identity(timestamp, speaker, text))
-
-        for segment in segments:
-            if not isinstance(segment, dict):
-                continue
-
+        for segment in canonical_segments:
             text = str(segment.get("text", "")).strip()
             if not text:
                 continue
@@ -313,9 +373,6 @@ async def sync_final_transcript_from_vexa(
 
             speaker = str(segment.get("speaker") or "Unknown").strip() or "Unknown"
             timestamp = _parse_absolute_start_time(absolute_start_time)
-            identity = _segment_identity(timestamp, speaker, text)
-            if identity in existing_keys:
-                continue
 
             db.add(
                 TranscriptChunk(
@@ -325,7 +382,6 @@ async def sync_final_transcript_from_vexa(
                     timestamp=timestamp,
                 )
             )
-            existing_keys.add(identity)
             inserted_count += 1
 
         try:
@@ -418,9 +474,9 @@ async def listen_to_vexa(
         "meetings": [{"platform": platform, "native_id": native_id}],
     }
 
-    #seen_absolute_start_times: set[str] = set()
+    segment_state_by_abs_start: dict[str, dict[str, Any]] = {}
     seen_immutable_summaries: set[str] = set()
-    seen_transcript_log_keys: set[tuple[str, str]] = set()
+    last_logged_text_by_abs_start: dict[str, str] = {}
     controller = ControllerAgent()
     max_attempts = 6
 
@@ -491,26 +547,36 @@ async def listen_to_vexa(
 
                     segments = _extract_segments(message)
                     for segment in segments:
-                        text = str(segment.get("text", "")).strip()
-                        if not text:
-                            continue
-
                         absolute_start_time = str(segment.get("absolute_start_time", "")).strip()
                         if not absolute_start_time:
+                            continue
+
+                        existing_segment = segment_state_by_abs_start.get(absolute_start_time)
+                        if not _should_replace_transcript_segment(existing_segment, segment):
+                            continue
+
+                        segment_state_by_abs_start[absolute_start_time] = segment
+
+                        text = str(segment.get("text", "")).strip()
+                        if not text:
                             continue
 
                         speaker = str(segment.get("speaker") or "Unknown").strip() or "Unknown"
                         timestamp = _parse_absolute_start_time(absolute_start_time)
 
-                        transcript_log_key = (absolute_start_time, text)
-                        if transcript_log_key not in seen_transcript_log_keys:
+                        previous_logged_text = last_logged_text_by_abs_start.get(absolute_start_time, "")
+                        if _should_log_transcript_update(
+                            is_immutable=is_immutable,
+                            text=text,
+                            previous_logged_text=previous_logged_text,
+                        ):
                             _log_transcript_line(
                                 meeting_id=meeting_id,
                                 speaker=speaker,
                                 text=text,
                                 is_immutable=is_immutable,
                             )
-                            seen_transcript_log_keys.add(transcript_log_key)
+                            last_logged_text_by_abs_start[absolute_start_time] = text
 
                         chunk_id: int | None = None
                         with SessionLocal() as db:
@@ -523,17 +589,27 @@ async def listen_to_vexa(
                                 select(TranscriptChunk)
                                 .where(
                                     TranscriptChunk.meeting_id == meeting_id,
-                                    TranscriptChunk.speaker == speaker,
                                     TranscriptChunk.timestamp == timestamp,
                                 )
+                                .order_by(TranscriptChunk.id.asc())
                                 .limit(1)
                             ).scalar_one_or_none()
+
                             if existing_chunk is not None:
                                 chunk_id = existing_chunk.id
-                                if existing_chunk.text != text:
+                                changed = False
+
+                                if str(existing_chunk.speaker or "").strip() != speaker:
+                                    existing_chunk.speaker = speaker
+                                    changed = True
+                                if str(existing_chunk.text or "").strip() != text:
                                     existing_chunk.text = text
+                                    changed = True
+
+                                if changed:
                                     try:
                                         db.commit()
+                                        db.refresh(existing_chunk)
                                     except SQLAlchemyError as exc:
                                         db.rollback()
                                         print(f"[Vexa] Failed to update transcript chunk: {exc}")
