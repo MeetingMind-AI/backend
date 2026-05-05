@@ -236,10 +236,7 @@ async def _generate_and_log_final_report(controller: ControllerAgent, meeting_id
         try:
             await controller.generate_final_report(meeting_id, db)
         except Exception as exc:  # noqa: BLE001
-            print(
-                f"[Vexa] Failed to generate final report for meeting {meeting_id}: "
-                f"{exc.__class__.__name__}: {exc}"
-            )
+            print(f"[Vexa] Failed to generate final report for meeting {meeting_id}: {type(exc).__name__}: {str(exc)}")
 
 
 def _is_local_meeting_terminal(meeting_id: int) -> bool:

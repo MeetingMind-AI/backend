@@ -53,7 +53,7 @@ class ControllerAgent:
 
         self.ollama_url = env_url or ollama_url
         self.model = env_model or model
-        self.timeout = env_timeout
+        self.timeout = env_timeout if env_timeout else 120.0
 
     async def _generate(self, prompt: str, system_prompt: str) -> str:
         payload = {
@@ -63,7 +63,7 @@ class ControllerAgent:
             "stream": False,
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout)) as client:
             response = await client.post(self.ollama_url, json=payload)
             response.raise_for_status()
             data = response.json()
