@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,6 +30,16 @@ FINAL_REPORT_SYSTEM_PROMPT = (
 )
 
 
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
 class ControllerAgent:
     def __init__(
         self,
@@ -35,9 +47,13 @@ class ControllerAgent:
         model: str = "llama3",
         timeout: float = 30.0,
     ) -> None:
-        self.ollama_url = ollama_url
-        self.model = model
-        self.timeout = timeout
+        env_url = os.getenv("OLLAMA_URL", "").strip()
+        env_model = os.getenv("OLLAMA_MODEL", "").strip()
+        env_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", timeout)
+
+        self.ollama_url = env_url or ollama_url
+        self.model = env_model or model
+        self.timeout = env_timeout
 
     async def _generate(self, prompt: str, system_prompt: str) -> str:
         payload = {
