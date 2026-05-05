@@ -31,7 +31,7 @@ FINAL_REPORT_SYSTEM_PROMPT = (
 class ControllerAgent:
     def __init__(
         self,
-        ollama_url: str = "http://host.docker.internal:11434/api/generate",
+        ollama_url: str = "http://ollama:11434/api/generate",
         model: str = "llama3",
         timeout: float = 30.0,
     ) -> None:
