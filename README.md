@@ -23,6 +23,8 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 
 - `GET /health`
 - `POST /api/meetings/start`
+  - Body: `{ "platform": "<platform>", "native_id": "<meeting-id>" }`
+  - Supported `platform` values: `google_meet`, `zoom`, `teams`
   - Starts a Vexa bot for a target platform/native meeting ID
 - `POST /api/meetings/{meeting_id}/leave`
   - Force bot to leave meeting via Vexa bot delete API
@@ -32,6 +34,25 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 Interactive docs:
 
 - `http://localhost:8000/docs`
+
+## Running with Docker Compose
+
+To quickly start the application and its dependencies (like PostgreSQL and Redis), you can use Docker Compose.
+
+1. Ensure you have [Docker](https://docs.docker.com/get-docker/) installed.
+2. Create a `.env` file in the root directory and populate it with the required environment variables (see the **Environment Variables** section below).
+3. Build and launch the services in detached mode:
+   ```bash
+   docker compose up -d --build
+   ```
+4. View the logs to ensure everything started correctly:
+   ```bash
+   docker compose logs -f
+   ```
+5. To stop and remove the containers:
+   ```bash
+   docker compose down
+   ```
 
 ## Environment Variables
 
