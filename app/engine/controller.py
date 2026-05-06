@@ -133,17 +133,12 @@ class ControllerAgent:
 
         meeting = db_session.get(Meeting, meeting_id)
         if meeting is not None:
-            report_field = None
-            for candidate in ("final_summary", "summary", "final_report"):
-                if hasattr(meeting, candidate):
-                    report_field = candidate
-                    break
+            # Save as JSON structure since column is JSONB
+            meeting.summary = {"report": report}
 
-            if report_field is not None:
-                setattr(meeting, report_field, report)
-                try:
-                    db_session.commit()
-                except Exception:  # noqa: BLE001
-                    db_session.rollback()
+            try:
+                db_session.commit()
+            except Exception:
+                db_session.rollback()
 
         return report
