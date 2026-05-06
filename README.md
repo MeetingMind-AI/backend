@@ -35,6 +35,54 @@ Interactive docs:
 
 - `http://localhost:8000/docs`
 
+## View Real-Time Transcripts
+
+Since the backend prints live transcript summaries to the console, you can view the live events directly from the Docker container logs. Run the following command:
+
+```bash
+docker compose logs -f backend
+```
+
+## View Transcripts in the Database
+
+You can also verify the saved transcripts directly in the PostgreSQL database using `docker exec` and `psql`:
+
+```bash
+docker exec -it meetingmind_postgres psql -U meetingmind -d meetingmind
+```
+
+Once connected, you can run a SQL query to check the chunk data for a specific meeting:
+
+```sql
+SELECT id, speaker, LEFT(text, 80) AS text_preview, timestamp 
+FROM transcript_chunks 
+WHERE meeting_id = meeting_id 
+ORDER BY timestamp;
+```
+### Database Schema Documentation
+
+#### 1. `meetings` Table
+Stores high-level metadata about meetings orchestrated by Vexa.
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | Internal tracking ID. |
+| `vexa_meeting_id` | `String(128)` | Unique, Indexed | The meeting ID returned from the Vexa service. |
+| `title` | `String(255)` | | The fallback or true title of the meeting. |
+| `status` | `String(64)` | `'pending'` | The meeting lifecycle status (e.g. `active`, `completed`). |
+| `final_summary` | `Text` | `NULL` | The generated final markdown summary report from Ollama. |
+| `created_at` | `DateTime` | `now()` | Local timestamp of when the meeting record was created. |
+
+#### 2. `transcript_chunks` Table
+Stores raw transcription snippets returned by Vexa WebSocket events and synced logs.
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | Unique ID for each speech chunk. |
+| `meeting_id` | `Integer` | Indexed | Foreign Key linking back to `meetings(id)`. |
+| `speaker` | `String(120)` | | Name of the person speaking. |
+| `text` | `Text` | | The transcribed speech. |
+| `timestamp` | `DateTime` | | The absolute start time of the speech chunk. |
 ## Running with Docker Compose
 
 To quickly start the application and its dependencies (like PostgreSQL and Redis), you can use Docker Compose.
