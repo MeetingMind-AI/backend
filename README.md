@@ -5,7 +5,7 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 ## Responsibilities
 
 - Start Vexa bots for meetings
-- Consume Vexa WebSocket events (meeting status and transcript updates)
+- Consume Vexa REST API for fully merged, pause-ignored transcripts
 - Persist transcripts to PostgreSQL
 - Generate live Agile insights and final meeting markdown reports via Ollama
 - Provide endpoints to control meeting lifecycle (including forcing bot leave)
@@ -16,7 +16,7 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 - SQLAlchemy + Alembic
 - PostgreSQL 15
 - Redis
-- WebSockets client (`websockets`)
+- WebSockets client (`websockets`) (Used for generic realtime updates, but no longer used for Vexa ingestion)
 - Ollama local inference (`llama3` by default)
 
 ## Service Endpoints
@@ -35,20 +35,67 @@ Interactive docs:
 
 ## Environment Variables
 
-- `DATABASE_URL` (required in production)
-- `REDIS_URL`
-- `VEXA_API_URL` (used for bot control; defaults handled by code paths)
-- `VEXA_WS_URL` (for WS listener)
-- `VEXA_API_KEY` (required)
-- `VEXA_WEBHOOK_SECRET` (optional; validates webhook auth)
-- `VEXA_MEETING_POLL_INTERVAL_SECONDS` (optional; poll fallback cadence)
+Configure these variables via a `.env` file at the root of your project or through your docker-compose environment configuration.
 
-## Transcript Ingestion Strategy
+### Required Authentication
+- **`VEXA_API_KEY`** (Required)
+  - **What it is:** The key used to authenticate with your local Vexa bot manager and WebSocket stream.
+  - **How to get it:** You must generate a token from your local Vexa instance using its Admin API. 
+    1. First, create a user:
+       ```bash
+       curl -X POST "http://localhost:8056/admin/users" \
+         -H "Content-Type: application/json" \
+         -H "X-Admin-API-Key: token" \
+         -d '{"email": "my.assistant@example.com", "name": "AI Assistant"}'
+       ```
+    2. Next, generate a token for that user (assuming the new user ID is `1`):
+       ```bash
+       curl -X POST "http://localhost:8056/admin/users/1/tokens" \
+         -H "Content-Type: application/json" \
+         -H "X-Admin-API-Key: token" \
+         -d '{"name": "Backend Key", "scopes": ["bot", "tx", "browser"]}'
+       ```
+    3. Finally, copy the generated token string from the response, set it in your environment (e.g., `VEXA_API_KEY=your_newly_copied_long_api_key_here`), and restart the backend container (`docker-compose restart backend` or `docker-compose stop backend && docker-compose up -d backend`).
 
-- Live WebSocket feed accepts `transcript.mutable` and `transcript.immutable` events.
-- Segments are keyed by `absolute_start_time` and updated using `updated_at` precedence and text quality heuristics.
-- DB writes update existing chunk rows by `(meeting_id, timestamp)` to avoid duplicate fragment rows.
-- Live insight summarization runs only on meaningful immutable text.
+### Database Configuration
+You can pass the full URL directly (recommended) or pass connection parameters individually:
+
+- **`DATABASE_URL`**
+  - **What it is:** Full connection string for your PostgreSQL instance.
+  - **How to get it:** Format it as `postgresql://<user>:<password>@<container_or_host>:<port>/<dbname>`. If you are running Postgres in Docker alongside this service, it will usually look like `postgresql://postgres:postgres@db:5432/postgres`.
+
+If `DATABASE_URL` is omitted, the application will fallback to building the connection using these manually:
+- **`POSTGRES_USER`** (default: `postgres`)
+- **`POSTGRES_PASSWORD`** (default: `postgres`)
+- **`POSTGRES_HOST`** (default: `localhost` — *Note: in Docker, you'll likely want to set this to your DB container name*)
+- **`POSTGRES_PORT`** (default: `5432`)
+- **`POSTGRES_DB`** (default: `postgres`)
+
+- **`REDIS_URL`**
+  - **What it is:** Full connection string for Redis.
+  - **How to get it:** Format it for your local Docker Redis container (e.g., `redis://redis:6379/0`).
+
+### Vexa URLs and Options
+Because Vexa is running locally, these URLs should point to the Vexa container or your host machine's ports.
+
+- **`VEXA_API_BASE_URL`** or **`VEXA_API_URL`**
+  - **What it is:** The REST endpoint for bot control and transcript syncing.
+  - **How to get it:** Leave blank to use the default `http://host.docker.internal:8056`.
+- **`VEXA_WS_URL`** (Deprecated)
+  - **What it is:** The WebSocket endpoint for live transcript listening. No longer used as we use REST polling.
+- **`VEXA_WEBHOOK_SECRET`** (Optional)
+  - **What it is:** A secret key used to validate incoming webhook payload signatures from Vexa.
+  - **How to get it:** Ensure both repositories share the same secret key in their `.env` files.
+- **`VEXA_MEETING_POLL_INTERVAL_SECONDS`** (Optional)
+  - **What it is:** Polling cadence fallback (in seconds) in case the WebSocket disconnects.
+  - **How to get it:** Defaults to `10`. No setup required.
+
+## Transcript Ingestion Strategy (REST API Polling)
+
+- We leverage the cleaner Vexa 0.10.6 API via `GET /transcripts/{platform}/{native_id}`.
+- This bypasses raw websockets and chunk management in favor of automatically merged, pause-ignored segments directly from the Vexa database.
+- A background task polls this endpoint periodically (`VEXA_MEETING_POLL_INTERVAL_SECONDS`) and automatically upserts the clean transcript segments into the `TranscriptChunk` table.
+- Live insight summarization (Ollama) runs only on meaningful immutable text.
 
 ## Finalization Strategy
 
@@ -64,41 +111,48 @@ On meeting `completed`:
 
 ## Local Development
 
-From monorepo root:
+### Prerequisites
+1. **Docker & Docker Compose:** Required to run the API (and databases if defined in your compose file).
+2. **Ollama:** The backend relies on Ollama for both real-time insights and final reports. 
+   - Install Ollama on your host machine.
+   - Make sure you pull the required model before running the backend:
+     ```bash
+     ollama pull llama3
+     ```
+   - Ollama must be reachable from the Docker container at `http://host.docker.internal:11434`. (You may need to set `OLLAMA_HOST=0.0.0.0` depending on your OS).
 
-- Build and run backend only:
-  - `docker-compose up -d --build backend`
-- Follow logs:
-  - `docker-compose logs -f backend`
+### Running the API
 
-If running outside Docker:
+Run the following from the root directory of your project using Docker Compose:
 
-1. Install dependencies:
-   - `pip install -r requirements.txt`
-2. Run migrations:
-   - `alembic upgrade head`
-3. Start API:
-   - `uvicorn app.main:app --host 0.0.0.0 --port 8000`
+1. **Build and start the backend service in the background:**
+   ```bash
+   docker-compose up -d --build backend
+   ```
+2. **Follow the service logs:**
+   ```bash
+   docker-compose logs -f backend
+   ```
 
 ## Migrations
 
 - Alembic config: `alembic.ini`
 - Migration scripts: `alembic/versions`
 - Generate a new migration after model changes:
-  - `alembic revision --autogenerate -m "describe change"`
+  - `docker compose exec backend alembic revision --autogenerate -m "initial_tables""`
 - Apply:
-  - `alembic upgrade head`
+  - `docker compose exec backend alembic upgrade head`
 
 ## Debugging Checklist
 
-- WS auth/subscription:
+- REST polling auth/subscription:
   - Ensure backend sees correct `VEXA_API_KEY`.
   - Confirm Vexa API Gateway reachable from container (`host.docker.internal:8056`).
 - Missing/poor summaries:
   - Check Ollama availability at `host.docker.internal:11434`.
   - Verify model exists and is loaded.
 - Transcript quality issues:
-  - Compare live logs vs post-sync canonical rows.
+  - Ensure polling is succeeding.
   - Validate final sync replaced rows on completion.
 
 ## Security Notes
