@@ -454,237 +454,34 @@ async def monitor_meeting_until_terminal(
     print(f"[Vexa] Meeting poll timeout for meeting {meeting_id} after {timeout_seconds}s")
 
 
-async def listen_to_vexa(
+async def poll_transcripts_from_vexa(
     meeting_id: int,
     platform: str,
     native_id: str,
     api_key: str | None = None,
+    poll_interval: int = 15,
 ) -> None:
-    await asyncio.sleep(2)
-
     vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
     if not vexa_api_key:
-        print(f"[Vexa] VEXA_API_KEY is missing; listener disabled for meeting {meeting_id}")
+        print(f"[Vexa] VEXA_API_KEY is missing; transcript polling disabled for meeting {meeting_id}")
         return
 
-    ws_url = _vexa_ws_url()
-    auth_ws_url = _append_api_key_query_param(ws_url, vexa_api_key)
-    subscription_message = {
-        "action": "subscribe",
-        "meetings": [{"platform": platform, "native_id": native_id}],
-    }
-
-    segment_state_by_abs_start: dict[str, dict[str, Any]] = {}
-    seen_immutable_summaries: set[str] = set()
-    last_logged_text_by_abs_start: dict[str, str] = {}
     controller = ControllerAgent()
-    max_attempts = 6
 
-    for attempt in range(1, max_attempts + 1):
-        if _is_local_meeting_terminal(meeting_id):
-            print(f"[Vexa] Meeting {meeting_id} is terminal; stopping listener")
-            return
-
+    while not _is_local_meeting_terminal(meeting_id):
         try:
-            async with _websocket_connect_with_headers(auth_ws_url, vexa_api_key) as websocket:
-                await websocket.send(json.dumps(subscription_message))
-
-                async for raw_message in websocket:
-                    message = _message_from_raw(raw_message)
-                    if message is None:
-                        continue
-
-                    message_type = str(message.get("type", "")).strip()
-                    if message_type == "error":
-                        error_code = str(message.get("error") or "").strip()
-                        error_details = message.get("details")
-                        print(
-                            f"[Vexa] Stream error for meeting {meeting_id}: "
-                            f"{error_code} details={error_details}"
-                        )
-
-                        details_text = str(error_details or "")
-                        if error_code in {"invalid_subscribe_payload", "authorization_service_error"}:
-                            raise RuntimeError(
-                                f"Subscription rejected for meeting {meeting_id}: "
-                                f"{error_code} {details_text}"
-                            )
-                        continue
-
-                    if message_type == "subscribed":
-                        subscribed_meetings = message.get("meetings")
-                        if not isinstance(subscribed_meetings, list) or len(subscribed_meetings) == 0:
-                            raise RuntimeError(
-                                f"Subscription acknowledged without active meetings for meeting {meeting_id}"
-                            )
-                        print(f"[Vexa] Subscribed to meeting stream: {meeting_id}")
-                        continue
-
-                    if message_type == "meeting.status":
-                        status_payload = message.get("payload")
-                        if isinstance(status_payload, dict):
-                            status_value = str(status_payload.get("status", "")).strip().lower()
-                            if status_value:
-                                update_meeting_status(meeting_id, status_value)
-                                print(f"[Vexa] Meeting {meeting_id} status -> {status_value}")
-                                if status_value in TERMINAL_MEETING_STATUSES:
-                                    if status_value == "completed":
-                                        await _finalize_completed_meeting(
-                                            controller=controller,
-                                            meeting_id=meeting_id,
-                                            platform=platform,
-                                            native_id=native_id,
-                                            api_key=vexa_api_key,
-                                            source="websocket",
-                                        )
-                                    return
-                            continue
-
-                    if message_type not in {"transcript.mutable", "transcript.immutable"}:
-                        continue
-
-                    is_immutable = message_type == "transcript.immutable"
-
-                    segments = _extract_segments(message)
-                    for segment in segments:
-                        absolute_start_time = str(segment.get("absolute_start_time", "")).strip()
-                        if not absolute_start_time:
-                            continue
-
-                        existing_segment = segment_state_by_abs_start.get(absolute_start_time)
-                        if not _should_replace_transcript_segment(existing_segment, segment):
-                            continue
-
-                        segment_state_by_abs_start[absolute_start_time] = segment
-
-                        text = str(segment.get("text", "")).strip()
-                        if not text:
-                            continue
-
-                        speaker = str(segment.get("speaker") or "Unknown").strip() or "Unknown"
-                        timestamp = _parse_absolute_start_time(absolute_start_time)
-
-                        previous_logged_text = last_logged_text_by_abs_start.get(absolute_start_time, "")
-                        if _should_log_transcript_update(
-                            is_immutable=is_immutable,
-                            text=text,
-                            previous_logged_text=previous_logged_text,
-                        ):
-                            _log_transcript_line(
-                                meeting_id=meeting_id,
-                                speaker=speaker,
-                                text=text,
-                                is_immutable=is_immutable,
-                            )
-                            last_logged_text_by_abs_start[absolute_start_time] = text
-
-                        chunk_id: int | None = None
-                        with SessionLocal() as db:
-                            meeting = db.get(Meeting, meeting_id)
-                            if meeting is None:
-                                print(f"[Vexa] Meeting {meeting_id} not found; skipping segment")
-                                continue
-
-                            existing_chunk = db.execute(
-                                select(TranscriptChunk)
-                                .where(
-                                    TranscriptChunk.meeting_id == meeting_id,
-                                    TranscriptChunk.timestamp == timestamp,
-                                )
-                                .order_by(TranscriptChunk.id.asc())
-                                .limit(1)
-                            ).scalar_one_or_none()
-
-                            if existing_chunk is not None:
-                                chunk_id = existing_chunk.id
-                                changed = False
-
-                                if str(existing_chunk.speaker or "").strip() != speaker:
-                                    existing_chunk.speaker = speaker
-                                    changed = True
-                                if str(existing_chunk.text or "").strip() != text:
-                                    existing_chunk.text = text
-                                    changed = True
-
-                                if changed:
-                                    try:
-                                        db.commit()
-                                        db.refresh(existing_chunk)
-                                    except SQLAlchemyError as exc:
-                                        db.rollback()
-                                        print(f"[Vexa] Failed to update transcript chunk: {exc}")
-                                        continue
-                            else:
-                                chunk = TranscriptChunk(
-                                    meeting_id=meeting_id,
-                                    speaker=speaker,
-                                    text=text,
-                                    timestamp=timestamp,
-                                )
-                                db.add(chunk)
-
-                                try:
-                                    db.commit()
-                                    db.refresh(chunk)
-                                    chunk_id = chunk.id
-                                except SQLAlchemyError as exc:
-                                    db.rollback()
-                                    print(f"[Vexa] Failed to save transcript chunk: {exc}")
-                                    continue
-
-                        try:
-                            if not is_immutable:
-                                continue
-                            if absolute_start_time in seen_immutable_summaries:
-                                continue
-                            if not _is_meaningful_realtime_text(text):
-                                seen_immutable_summaries.add(absolute_start_time)
-                                continue
-
-                            summary = await controller.summarize(text)
-                            seen_immutable_summaries.add(absolute_start_time)
-                            if summary == "IGNORE":
-                                continue
-
-                            print(
-                                f"[Vexa Summary] meeting={meeting_id} "
-                                f"chunk={chunk_id} speaker={speaker}: {summary}"
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            print(f"[Vexa] Failed to summarize chunk for meeting {meeting_id}: {exc}")
-
-                return
-        except ConnectionClosed as exc:
-            if exc.code == 4401:
-                print(
-                    f"[Vexa] Unauthorized WebSocket (4401) for meeting {meeting_id}. "
-                    "Verify VEXA_API_KEY is available in backend runtime and matches the key used for /bots."
-                )
-                return
-
-            if attempt >= max_attempts:
-                print(
-                    f"[Vexa] Listener stopped for meeting {meeting_id} after {attempt} attempts: "
-                    f"WebSocket closed code={exc.code} reason={exc.reason}"
-                )
-                return
-
-            backoff_seconds = min(2 ** (attempt - 1), 20)
-            print(
-                f"[Vexa] WebSocket closed for meeting {meeting_id} (code={exc.code}). "
-                f"Retrying in {backoff_seconds}s"
+            upserted = await sync_final_transcript_from_vexa(
+                meeting_id=meeting_id,
+                platform=platform,
+                native_id=native_id,
+                api_key=vexa_api_key,
             )
-            await asyncio.sleep(backoff_seconds)
-        except Exception as exc:  # noqa: BLE001
-            if attempt >= max_attempts:
-                print(
-                    f"[Vexa] Listener stopped for meeting {meeting_id} after {attempt} attempts: {exc}"
-                )
-                return
+            if upserted > 0:
+                print(f"[Vexa] Synced {upserted} clean transcript segments for meeting {meeting_id}")
+        except Exception as exc:
+            print(f"[Vexa] Transcript poll failed for meeting {meeting_id}: {exc}")
+        
+        await asyncio.sleep(poll_interval)
+    
+    print(f"[Vexa] Meeting {meeting_id} is terminal; stopping transcript polling")
 
-            backoff_seconds = min(2 ** (attempt - 1), 20)
-            print(
-                f"[Vexa] Listener error for meeting {meeting_id}: {exc}. "
-                f"Retrying in {backoff_seconds}s"
-            )
-            await asyncio.sleep(backoff_seconds)

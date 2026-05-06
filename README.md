@@ -5,7 +5,7 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 ## Responsibilities
 
 - Start Vexa bots for meetings
-- Consume Vexa WebSocket events (meeting status and transcript updates)
+- Consume Vexa REST API for fully merged, pause-ignored transcripts
 - Persist transcripts to PostgreSQL
 - Generate live Agile insights and final meeting markdown reports via Ollama
 - Provide endpoints to control meeting lifecycle (including forcing bot leave)
@@ -16,7 +16,7 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 - SQLAlchemy + Alembic
 - PostgreSQL 15
 - Redis
-- WebSockets client (`websockets`)
+- WebSockets client (`websockets`) (Used for generic realtime updates, but no longer used for Vexa ingestion)
 - Ollama local inference (`llama3` by default)
 
 ## Service Endpoints
@@ -150,9 +150,8 @@ Because Vexa is running locally, these URLs should point to the Vexa container o
 - **`VEXA_API_BASE_URL`** or **`VEXA_API_URL`**
   - **What it is:** The REST endpoint for bot control and transcript syncing.
   - **How to get it:** Leave blank to use the default `http://host.docker.internal:8056`.
-- **`VEXA_WS_URL`**
-  - **What it is:** The WebSocket endpoint for live transcript listening.
-  - **How to get it:** Leave blank to use the default `ws://host.docker.internal:8056/ws`.
+- **`VEXA_WS_URL`** (Deprecated)
+  - **What it is:** The WebSocket endpoint for live transcript listening. No longer used as we use REST polling.
 - **`VEXA_WEBHOOK_SECRET`** (Optional)
   - **What it is:** A secret key used to validate incoming webhook payload signatures from Vexa.
   - **How to get it:** Ensure both repositories share the same secret key in their `.env` files.
@@ -160,12 +159,12 @@ Because Vexa is running locally, these URLs should point to the Vexa container o
   - **What it is:** Polling cadence fallback (in seconds) in case the WebSocket disconnects.
   - **How to get it:** Defaults to `10`. No setup required.
 
-## Transcript Ingestion Strategy
+## Transcript Ingestion Strategy (REST API Polling)
 
-- Live WebSocket feed accepts `transcript.mutable` and `transcript.immutable` events.
-- Segments are keyed by `absolute_start_time` and updated using `updated_at` precedence and text quality heuristics.
-- DB writes update existing chunk rows by `(meeting_id, timestamp)` to avoid duplicate fragment rows.
-- Live insight summarization runs only on meaningful immutable text.
+- We leverage the cleaner Vexa 0.10.6 API via `GET /transcripts/{platform}/{native_id}`.
+- This bypasses raw websockets and chunk management in favor of automatically merged, pause-ignored segments directly from the Vexa database.
+- A background task polls this endpoint periodically (`VEXA_MEETING_POLL_INTERVAL_SECONDS`) and automatically upserts the clean transcript segments into the `TranscriptChunk` table.
+- Live insight summarization (Ollama) runs only on meaningful immutable text.
 
 ## Finalization Strategy
 
@@ -209,20 +208,20 @@ Run the following from the root directory of your project using Docker Compose:
 - Alembic config: `alembic.ini`
 - Migration scripts: `alembic/versions`
 - Generate a new migration after model changes:
-  - `alembic revision --autogenerate -m "describe change"`
+  - `docker compose exec backend alembic revision --autogenerate -m "initial_tables""`
 - Apply:
-  - `alembic upgrade head`
+  - `docker compose exec backend alembic upgrade head`
 
 ## Debugging Checklist
 
-- WS auth/subscription:
+- REST polling auth/subscription:
   - Ensure backend sees correct `VEXA_API_KEY`.
   - Confirm Vexa API Gateway reachable from container (`host.docker.internal:8056`).
 - Missing/poor summaries:
   - Check Ollama availability at `host.docker.internal:11434`.
   - Verify model exists and is loaded.
 - Transcript quality issues:
-  - Compare live logs vs post-sync canonical rows.
+  - Ensure polling is succeeding.
   - Validate final sync replaced rows on completion.
 
 ## Security Notes

@@ -15,7 +15,7 @@ from app.db.models import Meeting
 from app.db.session import SessionLocal
 from app.engine.vexa_client import (
     TERMINAL_MEETING_STATUSES,
-    listen_to_vexa,
+    poll_transcripts_from_vexa,
     monitor_meeting_until_terminal,
     sync_final_transcript_from_vexa,
     update_meeting_status,
@@ -126,7 +126,7 @@ async def start_meeting(request: MeetingStartRequest, background_tasks: Backgrou
             raise HTTPException(status_code=500, detail=f"Failed to create meeting: {exc}") from exc
 
     background_tasks.add_task(
-        listen_to_vexa,
+        poll_transcripts_from_vexa,
         meeting.id,
         request.platform,
         request.native_id,
