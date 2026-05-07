@@ -111,19 +111,29 @@ async def start_meeting(request: MeetingStartRequest, background_tasks: Backgrou
     status = str(deployed_bot_data.get("status") or "requested")
 
     with SessionLocal() as db:
-        meeting = Meeting(
-            vexa_meeting_id=vexa_meeting_id,
-            title=title,
-            status=status,
-        )
-        db.add(meeting)
+        # 1. Check if the meeting already exists
+        existing_stmt = select(Meeting).where(Meeting.vexa_meeting_id == vexa_meeting_id).limit(1)
+        meeting = db.execute(existing_stmt).scalar_one_or_none()
+
+        if meeting:
+            # 2. If it exists, just update its status and title
+            meeting.status = status
+            meeting.title = title
+        else:
+            # 3. If it doesn't exist, create it
+            meeting = Meeting(
+                vexa_meeting_id=vexa_meeting_id,
+                title=title,
+                status=status,
+            )
+            db.add(meeting)
 
         try:
             db.commit()
             db.refresh(meeting)
         except SQLAlchemyError as exc:
             db.rollback()
-            raise HTTPException(status_code=500, detail=f"Failed to create meeting: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"Failed to create/update meeting: {exc}") from exc
 
     background_tasks.add_task(
         poll_transcripts_from_vexa,
