@@ -174,11 +174,11 @@ On meeting `completed`:
 
 1. Sync canonical transcript from Vexa REST API.
 2. Replace local transcript rows for that meeting with canonical ordered rows.
-3. Generate final structured JSON report with sections:
-   - `summary`
-   - `action_items`
-   - `blockers`
-4. The report is saved in the `final_summary` JSONB column of the `meetings` table.
+3. Generate final structured JSON report using the Multi-Persona Architecture:
+   - **Tech Lead** and **Product Manager** agents run in parallel to extract technical debt, blockers, and feature requests.
+   - **Scrum Master (Lead Synthesizer)** runs next, receiving the findings from the Tech Lead and PM along with the raw transcript.
+   - The Scrum Master synthesizes the results, resolves conflicting constraints, and outputs the final master JSON report containing `summary`, `pending_to_schedule`, `parking_lot`, and `to_do`.
+4. The report is saved in the `final_summary` (mapped internally to `summary`) JSONB column of the `meetings` table.
 5. Emit progress logs while finalization is running.
 
 ## Local Development

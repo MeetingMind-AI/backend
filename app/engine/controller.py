@@ -8,34 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Meeting, TranscriptChunk
 
-REALTIME_SYSTEM_PROMPT = (
-    "You are an Agile assistant extracting live insights. If the text does not contain "
-    "meaningful action items, blockers, or agile updates, output exactly the word 'IGNORE'. "
-    "Do not apologize or explain."
-)
+import asyncio
 
-FINAL_REPORT_SYSTEM_PROMPT = (
-    "You are an Expert Agile Scrum Master and Technical Project Manager. Given the following meeting transcript, "
-    "generate a comprehensive and structured JSON report. Output ONLY valid JSON without any markdown formatting or explanation.\n"
-    "The JSON must have exactly this structure:\n"
-    "{\n"
-    '  "summary": "Provide a clear and thorough summary of the meeting, focusing on the main topics discussed, key goals, decisions made, and overall progress.",\n'
-    '  "pending_to_schedule": [\n'
-    '    {"task": "Description of any item, follow-up meeting, or discussion that needs to be scheduled", "owner": "Name of the person responsible, or null if unassigned"}\n'
-    "  ],\n"
-    '  "parking_lot": [\n'
-    '    "Description of any topic or idea raised during the meeting but deferred or parked for future discussion"\n'
-    "  ],\n"
-    '  "to_do": [\n'
-    '    {"task": "Detailed description of an action item or task to be completed", "owner": "Name of the person responsible, or null if unassigned"}\n'
-    "  ]\n"
-    "}\n\n"
-    "Rules:\n"
-    "1. Base your response strictly on the provided transcript. Do not invent details.\n"
-    "2. Do not mention missing transcript text, model limitations, or speculative issues.\n"
-    "3. Ensure the summary flows naturally and covers all major talking points.\n"
-    "4. If there are no items for a specific category, use an empty array []."
-)
+from app.engine.prompts import REALTIME_PERSONA_PROMPTS, FINAL_PERSONA_PROMPTS
 
 
 def _env_float(name: str, default: float) -> float:
@@ -81,24 +56,45 @@ class ControllerAgent:
             raise RuntimeError("Ollama returned an empty response")
         return raw_response
 
-    async def summarize(self, text: str) -> str:
+    async def summarize(self, text: str) -> dict[str, str]:
         cleaned_text = " ".join(text.split()).strip()
         if not cleaned_text:
-            return "IGNORE"
+            return {role: "IGNORE" for role in REALTIME_PERSONA_PROMPTS.keys()}
 
         prompt = (
             "Transcript:\n"
             f"{cleaned_text}\n\n"
-            "If this contains meaningful agile information, return one concise sentence that mentions "
-            "action item, decision, blocker, or status update if present. "
+            "If this contains meaningful information for your role, return one concise sentence. "
             "Otherwise return IGNORE."
         )
 
-        summary = await self._generate(prompt=prompt, system_prompt=REALTIME_SYSTEM_PROMPT)
-        normalized_summary = " ".join(summary.split())
-        if normalized_summary.upper() == "IGNORE":
-            return "IGNORE"
-        return normalized_summary
+        async def _fetch_persona(role: str, sys_prompt: str) -> tuple[str, str]:
+            try:
+                summary = await self._generate(prompt=prompt, system_prompt=sys_prompt)
+                normalized = " ".join(summary.split())
+                if normalized.upper() == "IGNORE":
+                    return role, "IGNORE"
+                return role, normalized
+            except Exception as e:
+                print(f"[ControllerAgent] Persona {role} failed: {e}")
+                return role, "IGNORE"
+
+        # Execute all three personas in parallel
+        tasks = [
+            _fetch_persona(role, sys_prompt) 
+            for role, sys_prompt in REALTIME_PERSONA_PROMPTS.items()
+        ]
+        results = await asyncio.gather(*tasks)
+        
+        return dict(results)
+
+    def _build_scrum_master_prompt(self, meeting_id: int, report_dict: dict[str, str], full_transcript: str) -> str:
+        return (
+            f"Meeting ID: {meeting_id}\n\n"
+            f"--- Tech Lead Findings ---\n{report_dict.get('tech_lead', '{}')}\n\n"
+            f"--- Product Manager Findings ---\n{report_dict.get('product_manager', '{}')}\n\n"
+            f"--- Full Transcript ---\n{full_transcript}"
+        )
 
     async def generate_final_report(self, meeting_id: int, db_session: Session) -> str:
         ordering_column = getattr(TranscriptChunk, "start_time", TranscriptChunk.timestamp)
@@ -127,18 +123,49 @@ class ControllerAgent:
             return empty_report
 
         prompt = f"Meeting ID: {meeting_id}\n\nTranscript:\n{full_transcript}"
-        report = await self._generate(prompt=prompt, system_prompt=FINAL_REPORT_SYSTEM_PROMPT)
+        
+        async def _fetch_persona_report(role: str, sys_prompt: str, prompt: str) -> tuple[str, str]:
+            try:
+                result = await self._generate(prompt=prompt, system_prompt=sys_prompt)
+                return role, result
+            except Exception as e:
+                print(f"[Vexa Final Report] Persona {role} failed: {e}")
+                return role, "{}"
 
-        print(f"[Vexa Final Report] meeting={meeting_id}\n{report}\n")
+        # Step 1: Execute Tech Lead and Product Manager in parallel
+        preliminary_personas = {
+            "tech_lead": FINAL_PERSONA_PROMPTS["tech_lead"],
+            "product_manager": FINAL_PERSONA_PROMPTS["product_manager"]
+        }
+                
+        tasks = [
+            _fetch_persona_report(role, sys_prompt, prompt) 
+            for role, sys_prompt in preliminary_personas.items()
+        ]
+        results = await asyncio.gather(*tasks)
+        report_dict = dict(results)
+
+        # Step 2: Inject their findings into the Scrum Master's prompt
+        scrum_master_prompt = self._build_scrum_master_prompt(meeting_id, report_dict, full_transcript)
+
+        # Step 3: Run the Scrum Master Synthesizer
+        scrum_master_result = await self._generate(
+            prompt=scrum_master_prompt, 
+            system_prompt=FINAL_PERSONA_PROMPTS["scrum_master"]
+        )
+        report_dict["scrum_master"] = scrum_master_result
+
+        print(f"[Vexa Final Report] meeting={meeting_id}\nTech Lead: {report_dict['tech_lead']}\nScrum Master: {report_dict['scrum_master']}\nProduct Manager: {report_dict['product_manager']}\n")
 
         meeting = db_session.get(Meeting, meeting_id)
         if meeting is not None:
             # Save as JSON structure since column is JSONB
-            meeting.summary = {"report": report}
+            meeting.summary = report_dict
 
             try:
                 db_session.commit()
             except Exception:
                 db_session.rollback()
 
-        return report
+        import json
+        return json.dumps(report_dict)
