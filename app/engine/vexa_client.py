@@ -266,8 +266,7 @@ def _extract_latest_remote_meeting(
             continue
         if str(item.get("platform", "")).strip() != platform:
             continue
-        item_native_id = str(item.get("native_meeting_id") or item.get("platform_specific_id") or "").strip()
-        if item_native_id != native_id:
+        if str(item.get("native_meeting_id", "")).strip() != native_id:
             continue
         matched.append(item)
 
@@ -431,7 +430,6 @@ async def monitor_meeting_until_terminal(
 
         remote_meeting = _extract_latest_remote_meeting(payload, platform, native_id)
         if not remote_meeting:
-            print(f"[Vexa] Poller could not find remote meeting for {platform}:{native_id} in {len(payload.get('meetings', []))} meetings")
             await asyncio.sleep(poll_interval)
             continue
 
@@ -440,7 +438,6 @@ async def monitor_meeting_until_terminal(
             update_meeting_status(meeting_id, status_value)
 
         if status_value in TERMINAL_MEETING_STATUSES:
-            print(f"[Vexa] Poller detected terminal status '{status_value}' for meeting {meeting_id}")
             if status_value == "completed":
                 await _finalize_completed_meeting(
                     controller=controller,
@@ -484,8 +481,7 @@ async def poll_transcripts_from_vexa(
                 print(f"[Vexa] Synced {upserted} clean transcript segments for meeting {meeting_id}")
         except Exception as exc:
             print(f"[Vexa] Transcript poll failed for meeting {meeting_id}: {exc}")
-        
-        await asyncio.sleep(poll_interval)
-    
-    print(f"[Vexa] Meeting {meeting_id} is terminal; stopping transcript polling")
 
+        await asyncio.sleep(poll_interval)
+
+    print(f"[Vexa] Meeting {meeting_id} is terminal; stopping transcript polling")

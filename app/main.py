@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from typing import Any
@@ -135,20 +136,13 @@ async def start_meeting(request: MeetingStartRequest, background_tasks: Backgrou
             db.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to create/update meeting: {exc}") from exc
 
-    background_tasks.add_task(
-        poll_transcripts_from_vexa,
-        meeting.id,
-        request.platform,
-        request.native_id,
-        vexa_api_key,
-    )
-    background_tasks.add_task(
-        monitor_meeting_until_terminal,
-        meeting.id,
-        request.platform,
-        request.native_id,
-        vexa_api_key,
-    )
+    async def run_meeting_tasks():
+        await asyncio.gather(
+            poll_transcripts_from_vexa(meeting.id, request.platform, request.native_id, vexa_api_key),
+            monitor_meeting_until_terminal(meeting.id, request.platform, request.native_id, vexa_api_key)
+        )
+
+    background_tasks.add_task(run_meeting_tasks)
 
     return {"meeting_id": meeting.id}
 
