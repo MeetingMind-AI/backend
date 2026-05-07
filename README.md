@@ -16,7 +16,6 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 - SQLAlchemy + Alembic
 - PostgreSQL 15
 - Redis
-- WebSockets client (`websockets`) (Used for generic realtime updates, but no longer used for Vexa ingestion)
 - Ollama local inference (`llama3` by default)
 
 ## Service Endpoints
@@ -26,6 +25,8 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
   - Body: `{ "platform": "<platform>", "native_id": "<meeting-id>" }`
   - Supported `platform` values: `google_meet`, `zoom`, `teams`
   - Starts a Vexa bot for a target platform/native meeting ID
+  - Upserts the meeting record (re-uses existing row if `vexa_meeting_id` already exists)
+  - Runs `poll_transcripts_from_vexa` and `monitor_meeting_until_terminal` concurrently via `asyncio.gather`
 - `POST /api/meetings/{meeting_id}/leave`
   - Force bot to leave meeting via Vexa bot delete API
 - `POST /api/vexa/webhook`
@@ -70,7 +71,7 @@ Stores high-level metadata about meetings orchestrated by Vexa.
 | `vexa_meeting_id` | `String(128)` | Unique, Indexed | The meeting ID returned from the Vexa service. |
 | `title` | `String(255)` | | The fallback or true title of the meeting. |
 | `status` | `String(64)` | `'pending'` | The meeting lifecycle status (e.g. `active`, `completed`). |
-| `final_summary` | `Text` | `NULL` | The generated final markdown summary report from Ollama. |
+| `final_summary` | `JSONB` | `NULL` | The generated final structured JSON report from Ollama (keys: `summary`, `action_items`, `blockers`). |
 | `created_at` | `DateTime` | `now()` | Local timestamp of when the meeting record was created. |
 
 #### 2. `transcript_chunks` Table
@@ -163,8 +164,9 @@ Because Vexa is running locally, these URLs should point to the Vexa container o
 
 - We leverage the cleaner Vexa 0.10.6 API via `GET /transcripts/{platform}/{native_id}`.
 - This bypasses raw websockets and chunk management in favor of automatically merged, pause-ignored segments directly from the Vexa database.
-- A background task polls this endpoint periodically (`VEXA_MEETING_POLL_INTERVAL_SECONDS`) and automatically upserts the clean transcript segments into the `TranscriptChunk` table.
-- Live insight summarization (Ollama) runs only on meaningful immutable text.
+- `poll_transcripts_from_vexa` runs as an `asyncio` background task alongside `monitor_meeting_until_terminal` (both started via `asyncio.gather`).
+- The poller periodically calls `sync_final_transcript_from_vexa` and upserts clean segments into the `TranscriptChunk` table.
+- Live insight summarization (Ollama) runs on meaningful immutable text.
 
 ## Finalization Strategy
 
@@ -172,11 +174,12 @@ On meeting `completed`:
 
 1. Sync canonical transcript from Vexa REST API.
 2. Replace local transcript rows for that meeting with canonical ordered rows.
-3. Generate final markdown report with sections:
-   - `## Summary`
-   - `## Action Items`
-   - `## Blockers`
-4. Emit progress logs while finalization is running.
+3. Generate final structured JSON report with sections:
+   - `summary`
+   - `action_items`
+   - `blockers`
+4. The report is saved in the `final_summary` JSONB column of the `meetings` table.
+5. Emit progress logs while finalization is running.
 
 ## Local Development
 
@@ -196,19 +199,22 @@ Run the following from the root directory of your project using Docker Compose:
 
 1. **Build and start the backend service in the background:**
    ```bash
-   docker-compose up -d --build backend
+   docker compose up -d --build backend
    ```
 2. **Follow the service logs:**
    ```bash
-   docker-compose logs -f backend
+   docker compose logs -f backend
    ```
+
+> Note: Ollama now runs as a Docker service (`meetingmind_ollama`) via the root `docker-compose.yml`.
+> On Linux VMs with NVIDIA GPUs, uncomment the `deploy.resources` section in `docker-compose.yml` to enable GPU acceleration.
 
 ## Migrations
 
 - Alembic config: `alembic.ini`
 - Migration scripts: `alembic/versions`
 - Generate a new migration after model changes:
-  - `docker compose exec backend alembic revision --autogenerate -m "initial_tables""`
+  - `docker compose exec backend alembic revision --autogenerate -m "initial_tables"`
 - Apply:
   - `docker compose exec backend alembic upgrade head`
 
@@ -218,11 +224,13 @@ Run the following from the root directory of your project using Docker Compose:
   - Ensure backend sees correct `VEXA_API_KEY`.
   - Confirm Vexa API Gateway reachable from container (`host.docker.internal:8056`).
 - Missing/poor summaries:
-  - Check Ollama availability at `host.docker.internal:11434`.
+  - Check Ollama availability at `http://ollama:11434` (Docker network) or `host.docker.internal:11434` (host).
   - Verify model exists and is loaded.
 - Transcript quality issues:
-  - Ensure polling is succeeding.
+  - Ensure polling background task is running (`docker compose logs -f backend`).
   - Validate final sync replaced rows on completion.
+- Backend restart / duplicate meetings:
+  - `start_meeting` now upserts by `vexa_meeting_id`, so restarting the backend won't create duplicate records.
 
 ## Security Notes
 
