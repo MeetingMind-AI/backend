@@ -21,6 +21,7 @@ class Meeting(Base):
         server_default=text("'pending'"),
     )
     summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    discussion_log: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

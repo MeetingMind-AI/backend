@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 
 import httpx
@@ -7,165 +9,347 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Meeting, TranscriptChunk
+from app.engine.prompts import (
+    REALTIME_PERSONA_PROMPTS,
+    INITIAL_ANALYSIS_PROMPTS,
+    SYNTHESIS_PROMPT,
+    DISCUSSION_PERSONA_PROMPTS,
+)
 
-import asyncio
+DEFAULT_DISCUSSION_ROUNDS = 1
 
-from app.engine.prompts import REALTIME_PERSONA_PROMPTS, FINAL_PERSONA_PROMPTS
+DISCUSSION_ROLES = ("tech_lead", "product_manager")
 
+
+# ---------------------------------------------------------------------------
+# Low-level LLM client
+# ---------------------------------------------------------------------------
 
 def _env_float(name: str, default: float) -> float:
-    raw_value = os.getenv(name, "").strip()
-    if not raw_value:
+    raw = os.getenv(name, "").strip()
+    if not raw:
         return default
     try:
-        return float(raw_value)
+        return float(raw)
     except ValueError:
         return default
 
 
-class ControllerAgent:
+class OllamaClient:
+    """Thin async wrapper around the Ollama /api/generate endpoint."""
+
     def __init__(
         self,
-        ollama_url: str = "http://ollama:11434/api/generate",
+        url: str = "http://ollama:11434/api/generate",
         model: str = "llama3",
         timeout: float = 30.0,
     ) -> None:
-        env_url = os.getenv("OLLAMA_URL", "").strip()
-        env_model = os.getenv("OLLAMA_MODEL", "").strip()
-        env_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", timeout)
+        self.url = os.getenv("OLLAMA_URL", "").strip() or url
+        self.model = os.getenv("OLLAMA_MODEL", "").strip() or model
+        raw_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", timeout)
+        self.timeout = raw_timeout if raw_timeout else 120.0
 
-        self.ollama_url = env_url or ollama_url
-        self.model = env_model or model
-        self.timeout = env_timeout if env_timeout else 120.0
-
-    async def _generate(self, prompt: str, system_prompt: str) -> str:
+    async def generate(self, prompt: str, system_prompt: str) -> str:
         payload = {
             "model": self.model,
             "prompt": prompt,
             "system": system_prompt,
             "stream": False,
         }
-
         async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout)) as client:
-            response = await client.post(self.ollama_url, json=payload)
+            response = await client.post(self.url, json=payload)
             response.raise_for_status()
             data = response.json()
 
-        raw_response = str(data.get("response", "")).strip()
-        if not raw_response:
+        text = str(data.get("response", "")).strip()
+        if not text:
             raise RuntimeError("Ollama returned an empty response")
-        return raw_response
+        return text
 
-    async def summarize(self, text: str) -> dict[str, str]:
-        cleaned_text = " ".join(text.split()).strip()
-        if not cleaned_text:
-            return {role: "IGNORE" for role in REALTIME_PERSONA_PROMPTS.keys()}
 
-        prompt = (
-            "Transcript:\n"
-            f"{cleaned_text}\n\n"
-            "If this contains meaningful information for your role, return one concise sentence. "
-            "Otherwise return IGNORE."
-        )
+# ---------------------------------------------------------------------------
+# Discussion engine  (Tech Lead ↔ Product Manager debate)
+# ---------------------------------------------------------------------------
 
-        async def _fetch_persona(role: str, sys_prompt: str) -> tuple[str, str]:
-            try:
-                summary = await self._generate(prompt=prompt, system_prompt=sys_prompt)
-                normalized = " ".join(summary.split())
-                if normalized.upper() == "IGNORE":
-                    return role, "IGNORE"
-                return role, normalized
-            except Exception as e:
-                print(f"[ControllerAgent] Persona {role} failed: {e}")
-                return role, "IGNORE"
+class DiscussionEngine:
+    """Orchestrates multi-round discussions between personas."""
 
-        # Execute all three personas in parallel
-        tasks = [
-            _fetch_persona(role, sys_prompt) 
-            for role, sys_prompt in REALTIME_PERSONA_PROMPTS.items()
+    def __init__(self, llm: OllamaClient) -> None:
+        self._llm = llm
+
+    async def run(
+        self,
+        meeting_id: int,
+        initial_reports: dict[str, str],
+        transcript: str,
+        num_rounds: int,
+    ) -> list[dict[str, str]]:
+        """Execute *num_rounds* of Tech Lead ↔ PM discussion."""
+        log: list[dict[str, str]] = []
+
+        for round_num in range(1, num_rounds + 1):
+            print(f"[Discussion] meeting={meeting_id} round {round_num}/{num_rounds}")
+
+            context = self._build_context(
+                meeting_id, transcript, initial_reports, log, round_num,
+            )
+
+            tasks = [
+                self._discuss(role, prompt, context, meeting_id, round_num)
+                for role, prompt in DISCUSSION_PERSONA_PROMPTS.items()
+            ]
+            results = await asyncio.gather(*tasks)
+
+            entry: dict[str, str] = {"round": str(round_num)}
+            for role, response in results:
+                entry[role] = response
+                preview = " ".join(response.split())[:200]
+                label = role.replace("_", " ").title()
+                print(f"[Discussion] meeting={meeting_id} round={round_num} {label}: {preview}...")
+
+            log.append(entry)
+
+        return log
+
+    # -- private helpers ---------------------------------------------------
+
+    async def _discuss(
+        self, role: str, sys_prompt: str, context: str,
+        meeting_id: int, round_num: int,
+    ) -> tuple[str, str]:
+        try:
+            result = await self._llm.generate(prompt=context, system_prompt=sys_prompt)
+            return role, result
+        except Exception as exc:
+            print(f"[Discussion] {role} failed in round {round_num}: {exc}")
+            return role, f"[Error: {exc}]"
+
+    @staticmethod
+    def _build_context(
+        meeting_id: int,
+        transcript: str,
+        initial_reports: dict[str, str],
+        history: list[dict[str, str]],
+        current_round: int,
+    ) -> str:
+        parts = [
+            f"Meeting ID: {meeting_id}\n",
+            "=== MEETING TRANSCRIPT ===",
+            transcript,
+            "",
+            "=== INITIAL ANALYSES ===",
         ]
-        results = await asyncio.gather(*tasks)
-        
-        return dict(results)
+        for role, report in initial_reports.items():
+            parts += [f"--- {role.replace('_', ' ').title()} (Initial) ---", report, ""]
 
-    def _build_scrum_master_prompt(self, meeting_id: int, report_dict: dict[str, str], full_transcript: str) -> str:
-        return (
-            f"Meeting ID: {meeting_id}\n\n"
-            f"--- Tech Lead Findings ---\n{report_dict.get('tech_lead', '{}')}\n\n"
-            f"--- Product Manager Findings ---\n{report_dict.get('product_manager', '{}')}\n\n"
-            f"--- Full Transcript ---\n{full_transcript}"
-        )
+        if history:
+            parts.append("=== DISCUSSION HISTORY ===")
+            for entry in history:
+                parts.append(f"--- Round {entry.get('round', '?')} ---")
+                for role in DISCUSSION_ROLES:
+                    if role in entry:
+                        parts += [f"[{role.replace('_', ' ').title()}]:", entry[role], ""]
 
-    async def generate_final_report(self, meeting_id: int, db_session: Session) -> str:
-        ordering_column = getattr(TranscriptChunk, "start_time", TranscriptChunk.timestamp)
+        parts += [f"\n=== YOUR TURN: Discussion Round {current_round} ===",
+                  "Review all the above and respond according to your role's discussion format."]
+        return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Report builder  (prompt assembly — no LLM calls, no DB)
+# ---------------------------------------------------------------------------
+
+class ReportPromptBuilder:
+    """Assembles the final Scrum Master synthesis prompt."""
+
+    @staticmethod
+    def build(
+        meeting_id: int,
+        initial_reports: dict[str, str],
+        transcript: str,
+        discussion_log: list[dict[str, str]] | None = None,
+    ) -> str:
+        parts = [
+            f"Meeting ID: {meeting_id}\n",
+            "--- Tech Lead Findings ---",
+            initial_reports.get("tech_lead", "{}"),
+            "",
+            "--- Product Manager Findings ---",
+            initial_reports.get("product_manager", "{}"),
+            "",
+        ]
+
+        if discussion_log:
+            parts.append("--- Cross-Functional Discussion ---")
+            for entry in discussion_log:
+                parts.append(f"  Round {entry.get('round', '?')}:")
+                for role in DISCUSSION_ROLES:
+                    if role in entry:
+                        label = role.replace("_", " ").title()
+                        parts.append(f"    [{label}]: {entry[role]}")
+                parts.append("")
+
+        parts += ["--- Full Transcript ---", transcript]
+        return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Transcript loader  (DB read — no LLM, no prompts)
+# ---------------------------------------------------------------------------
+
+class TranscriptLoader:
+    """Reads transcript chunks from the database."""
+
+    @staticmethod
+    def load(meeting_id: int, db: Session) -> str:
+        ordering = getattr(TranscriptChunk, "start_time", TranscriptChunk.timestamp)
         chunks = (
-            db_session.execute(
+            db.execute(
                 select(TranscriptChunk)
                 .where(TranscriptChunk.meeting_id == meeting_id)
-                .order_by(ordering_column.asc())
+                .order_by(ordering.asc())
             )
             .scalars()
             .all()
         )
-
-        transcript_lines: list[str] = []
+        lines: list[str] = []
         for chunk in chunks:
             text = str(chunk.text or "").strip()
             if not text:
                 continue
             speaker = str(chunk.speaker or "Unknown").strip() or "Unknown"
-            transcript_lines.append(f"{speaker}: {text}")
+            lines.append(f"{speaker}: {text}")
+        return "\n".join(lines).strip()
 
-        full_transcript = "\n".join(transcript_lines).strip()
-        if not full_transcript:
-            empty_report = "## Summary\nNo transcript content available."
-            print(f"[Vexa Final Report] meeting={meeting_id}\n{empty_report}\n")
-            return empty_report
 
-        prompt = f"Meeting ID: {meeting_id}\n\nTranscript:\n{full_transcript}"
-        
-        async def _fetch_persona_report(role: str, sys_prompt: str, prompt: str) -> tuple[str, str]:
+# ---------------------------------------------------------------------------
+# Controller  (orchestrator — ties everything together)
+# ---------------------------------------------------------------------------
+
+class ControllerAgent:
+    """High-level orchestrator for real-time summaries and final reports."""
+
+    def __init__(
+        self,
+        ollama_url: str = "http://ollama:11434/api/generate",
+        model: str = "llama3",
+        timeout: float = 30.0,
+    ) -> None:
+        self._llm = OllamaClient(url=ollama_url, model=model, timeout=timeout)
+        self._discussion = DiscussionEngine(self._llm)
+
+    # -- Real-time summarisation -------------------------------------------
+
+    async def summarize(self, text: str) -> dict[str, str]:
+        cleaned = " ".join(text.split()).strip()
+        if not cleaned:
+            return {role: "IGNORE" for role in REALTIME_PERSONA_PROMPTS}
+
+        prompt = (
+            f"Transcript:\n{cleaned}\n\n"
+            "If this contains meaningful information for your role, return one concise sentence. "
+            "Otherwise return IGNORE."
+        )
+
+        async def _run(role: str, sys_prompt: str) -> tuple[str, str]:
             try:
-                result = await self._generate(prompt=prompt, system_prompt=sys_prompt)
-                return role, result
-            except Exception as e:
-                print(f"[Vexa Final Report] Persona {role} failed: {e}")
+                raw = await self._llm.generate(prompt=prompt, system_prompt=sys_prompt)
+                normalised = " ".join(raw.split())
+                return role, ("IGNORE" if normalised.upper() == "IGNORE" else normalised)
+            except Exception as exc:
+                print(f"[ControllerAgent] Persona {role} failed: {exc}")
+                return role, "IGNORE"
+
+        results = await asyncio.gather(
+            *[_run(r, p) for r, p in REALTIME_PERSONA_PROMPTS.items()]
+        )
+        return dict(results)
+
+    # -- Final report ------------------------------------------------------
+
+    async def generate_final_report(
+        self,
+        meeting_id: int,
+        db_session: Session,
+        num_rounds: int | None = None,
+    ) -> str:
+        if num_rounds is None:
+            num_rounds = DEFAULT_DISCUSSION_ROUNDS
+        num_rounds = max(num_rounds, 0)
+
+        # 1. Load transcript
+        transcript = TranscriptLoader.load(meeting_id, db_session)
+        if not transcript:
+            msg = "## Summary\nNo transcript content available."
+            print(f"[Final Report] meeting={meeting_id}\n{msg}\n")
+            return msg
+
+        # 2. Initial analysis: Tech Lead + Product Manager (parallel)
+        base_prompt = f"Meeting ID: {meeting_id}\n\nTranscript:\n{transcript}"
+        initial_reports = await self._run_initial_analyses(base_prompt)
+
+        # 3. Discussion rounds (Tech Lead ↔ PM)
+        discussion_log: list[dict[str, str]] = []
+        if num_rounds > 0:
+            print(f"[Final Report] meeting={meeting_id} starting {num_rounds}-round discussion")
+            discussion_log = await self._discussion.run(
+                meeting_id=meeting_id,
+                initial_reports=initial_reports,
+                transcript=transcript,
+                num_rounds=num_rounds,
+            )
+
+        # 4. Scrum Master synthesis
+        synthesis_prompt = ReportPromptBuilder.build(
+            meeting_id, initial_reports, transcript, discussion_log,
+        )
+        scrum_master_result = await self._llm.generate(
+            prompt=synthesis_prompt, system_prompt=SYNTHESIS_PROMPT,
+        )
+
+        # 5. Assemble and persist
+        report = {**initial_reports, "scrum_master": scrum_master_result}
+        self._persist(db_session, meeting_id, report, discussion_log)
+
+        print(
+            f"[Final Report] meeting={meeting_id}\n"
+            f"Tech Lead: {report['tech_lead']}\n"
+            f"Product Manager: {report['product_manager']}\n"
+            f"Scrum Master: {report['scrum_master']}\n"
+        )
+        return json.dumps(report)
+
+    # -- private helpers ---------------------------------------------------
+
+    async def _run_initial_analyses(self, prompt: str) -> dict[str, str]:
+        async def _fetch(role: str, sys_prompt: str) -> tuple[str, str]:
+            try:
+                return role, await self._llm.generate(prompt=prompt, system_prompt=sys_prompt)
+            except Exception as exc:
+                print(f"[Final Report] Persona {role} failed: {exc}")
                 return role, "{}"
 
-        # Step 1: Execute Tech Lead and Product Manager in parallel
-        preliminary_personas = {
-            "tech_lead": FINAL_PERSONA_PROMPTS["tech_lead"],
-            "product_manager": FINAL_PERSONA_PROMPTS["product_manager"]
-        }
-                
-        tasks = [
-            _fetch_persona_report(role, sys_prompt, prompt) 
-            for role, sys_prompt in preliminary_personas.items()
-        ]
-        results = await asyncio.gather(*tasks)
-        report_dict = dict(results)
-
-        # Step 2: Inject their findings into the Scrum Master's prompt
-        scrum_master_prompt = self._build_scrum_master_prompt(meeting_id, report_dict, full_transcript)
-
-        # Step 3: Run the Scrum Master Synthesizer
-        scrum_master_result = await self._generate(
-            prompt=scrum_master_prompt, 
-            system_prompt=FINAL_PERSONA_PROMPTS["scrum_master"]
+        results = await asyncio.gather(
+            *[_fetch(r, p) for r, p in INITIAL_ANALYSIS_PROMPTS.items()]
         )
-        report_dict["scrum_master"] = scrum_master_result
+        return dict(results)
 
-        print(f"[Vexa Final Report] meeting={meeting_id}\nTech Lead: {report_dict['tech_lead']}\nScrum Master: {report_dict['scrum_master']}\nProduct Manager: {report_dict['product_manager']}\n")
+    @staticmethod
+    def _persist(
+        db: Session,
+        meeting_id: int,
+        report: dict[str, str],
+        discussion_log: list[dict[str, str]],
+    ) -> None:
+        meeting = db.get(Meeting, meeting_id)
+        if meeting is None:
+            return
 
-        meeting = db_session.get(Meeting, meeting_id)
-        if meeting is not None:
-            # Save as JSON structure since column is JSONB
-            meeting.summary = report_dict
+        meeting.summary = report
+        if discussion_log and hasattr(meeting, "discussion_log"):
+            meeting.discussion_log = discussion_log
 
-            try:
-                db_session.commit()
-            except Exception:
-                db_session.rollback()
-
-        import json
-        return json.dumps(report_dict)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
