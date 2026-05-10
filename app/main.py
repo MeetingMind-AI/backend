@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.websockets import router as websocket_router
-from app.db.models import Meeting
+from app.db.models import Meeting, TranscriptChunk
 from app.db.session import SessionLocal
 from app.engine.vexa_client import (
     TERMINAL_MEETING_STATUSES,
@@ -257,6 +257,36 @@ async def handle_vexa_webhook(
             status_to in TERMINAL_MEETING_STATUSES and platform and native_id
         ),
     }
+
+
+@app.get("/api/meetings/{meeting_id}/transcript")
+def get_transcript(meeting_id: int) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        chunks = (
+            db.execute(
+                select(TranscriptChunk)
+                .where(TranscriptChunk.meeting_id == meeting_id)
+                .order_by(TranscriptChunk.timestamp.asc())
+            )
+            .scalars()
+            .all()
+        )
+        return {
+            "meeting_id": meeting_id,
+            "status": meeting.status,
+            "chunks": [
+                {
+                    "id": c.id,
+                    "speaker": c.speaker,
+                    "text": c.text,
+                    "timestamp": c.timestamp.isoformat(),
+                }
+                for c in chunks
+            ],
+        }
 
 
 @app.get("/health", tags=["health"])
