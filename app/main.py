@@ -32,6 +32,10 @@ class MeetingStartRequest(BaseModel):
     native_id: str = Field(min_length=1)
 
 
+class MeetingRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+
+
 def _find_local_meeting_id(vexa_meeting_id: str | None, platform: str, native_id: str) -> int | None:
     with SessionLocal() as db:
         if vexa_meeting_id:
@@ -294,6 +298,36 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
             "summary": meeting.summary,
             "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
         }
+
+
+@app.patch("/api/meetings/{meeting_id}")
+def rename_meeting(meeting_id: int, request: MeetingRenameRequest) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        meeting.title = request.title
+        try:
+            db.commit()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to rename meeting: {exc}") from exc
+    return {"id": meeting_id, "title": request.title}
+
+
+@app.delete("/api/meetings/{meeting_id}")
+def delete_meeting_record(meeting_id: int) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        try:
+            db.delete(meeting)
+            db.commit()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to delete meeting: {exc}") from exc
+    return {"ok": True}
 
 
 @app.get("/api/meetings/{meeting_id}/transcript")
