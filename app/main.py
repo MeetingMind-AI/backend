@@ -259,6 +259,21 @@ async def handle_vexa_webhook(
     }
 
 
+@app.get("/api/meetings/{meeting_id}")
+def get_meeting(meeting_id: int) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        return {
+            "id": meeting.id,
+            "title": meeting.title,
+            "status": meeting.status,
+            "summary": meeting.summary,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+        }
+
+
 @app.get("/api/meetings/{meeting_id}/transcript")
 def get_transcript(meeting_id: int) -> dict[str, Any]:
     with SessionLocal() as db:
