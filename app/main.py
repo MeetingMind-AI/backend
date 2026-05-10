@@ -259,6 +259,28 @@ async def handle_vexa_webhook(
     }
 
 
+@app.get("/api/meetings")
+def list_meetings() -> dict[str, Any]:
+    with SessionLocal() as db:
+        meetings = (
+            db.execute(select(Meeting).order_by(Meeting.created_at.desc()))
+            .scalars()
+            .all()
+        )
+        return {
+            "meetings": [
+                {
+                    "id": m.id,
+                    "title": m.title,
+                    "status": m.status,
+                    "summary": m.summary,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                }
+                for m in meetings
+            ]
+        }
+
+
 @app.get("/api/meetings/{meeting_id}")
 def get_meeting(meeting_id: int) -> dict[str, Any]:
     with SessionLocal() as db:
