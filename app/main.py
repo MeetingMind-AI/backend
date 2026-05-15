@@ -187,45 +187,62 @@ async def start_meeting(
 
 
 @app.post("/api/meetings/{meeting_id}/leave")
-async def leave_meeting(meeting_id: int) -> dict[str, Any]:
+async def leave_meeting(
+    meeting_id: int, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
 
         platform, native_id = _get_local_meeting_context(meeting_id)
-        if not platform or not native_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot determine platform/native_id for meeting",
-            )
 
     vexa_api_key = os.getenv("VEXA_API_KEY", "")
-    if not vexa_api_key:
-        raise HTTPException(status_code=500, detail="VEXA_API_KEY is not configured")
 
-    headers = {
-        "X-API-Key": vexa_api_key,
-    }
+    if platform and native_id and vexa_api_key:
+        headers = {
+            "X-API-Key": vexa_api_key,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.delete(
+                    f"http://host.docker.internal:8056/bots/{platform}/{native_id}",
+                    headers=headers,
+                )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            print(f"[Leave] Failed to remove bot: {exc}")
+        except httpx.HTTPError as exc:
+            print(f"[Leave] Failed to contact Vexa service: {exc}")
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.delete(
-                f"http://host.docker.internal:8056/bots/{platform}/{native_id}",
-                headers=headers,
-            )
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=exc.response.status_code,
-            detail=exc.response.text or "Failed to leave meeting",
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Failed to contact Vexa service: {exc}"
-        ) from exc
+    background_tasks.add_task(
+        _finalize_meeting, meeting_id, platform or "", native_id or "", vexa_api_key
+    )
 
     return {"ok": True}
+
+
+async def _finalize_meeting(
+    meeting_id: int, platform: str, native_id: str, api_key: str
+) -> None:
+    update_meeting_status(meeting_id, "completed")
+
+    if platform and native_id and api_key:
+        try:
+            await sync_final_transcript_from_vexa(
+                meeting_id, platform, native_id, api_key
+            )
+            print(f"[Leave] Synced final transcript for meeting {meeting_id}")
+        except Exception as exc:
+            print(f"[Leave] Transcript sync failed: {exc}")
+
+    with SessionLocal() as db:
+        controller = ControllerAgent()
+        try:
+            await controller.generate_final_report(meeting_id, db)
+            print(f"[Leave] Generated final report for meeting {meeting_id}")
+        except Exception as exc:
+            print(f"[Leave] Failed to generate final report: {exc}")
 
 
 @app.post("/api/meetings/{meeting_id}/explain")
