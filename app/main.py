@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.websockets import router as websocket_router
+from app.api.ws_manager import manager
 from app.db.models import AgentAction, Meeting, TranscriptChunk
 from app.db.session import SessionLocal
 from app.engine.controller import ControllerAgent
@@ -169,7 +170,11 @@ async def start_meeting(
     async def run_meeting_tasks():
         await asyncio.gather(
             poll_transcripts_from_vexa(
-                meeting.id, request.platform, request.native_id, vexa_api_key
+                meeting.id,
+                request.platform,
+                request.native_id,
+                vexa_api_key,
+                ws_manager=manager,
             ),
             monitor_meeting_until_terminal(
                 meeting.id, request.platform, request.native_id, vexa_api_key

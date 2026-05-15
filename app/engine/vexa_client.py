@@ -14,7 +14,8 @@ from websockets.exceptions import ConnectionClosed
 from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.db.models import Meeting, TranscriptChunk
+from app.api.ws_manager import ConnectionManager
+from app.db.models import AgentAction, Meeting, TranscriptChunk
 from app.db.session import SessionLocal
 from app.engine.controller import ControllerAgent
 
@@ -22,6 +23,20 @@ VEXA_WS_URL = "ws://host.docker.internal:8056/ws"
 TERMINAL_MEETING_STATUSES = {"completed", "failed"}
 REALTIME_MIN_WORDS = 4
 FINALIZATION_PROGRESS_INTERVAL_SECONDS = 5
+
+_seen_chunk_sigs: dict[int, set[str]] = {}
+
+
+def _get_chunk_sigs(meeting_id: int) -> set[str]:
+    with SessionLocal() as db:
+        chunks = (
+            db.execute(
+                select(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id)
+            )
+            .scalars()
+            .all()
+        )
+        return {f"{c.speaker}|||{c.text.strip()}" for c in chunks}
 
 
 def _vexa_ws_url() -> str:
@@ -135,8 +150,12 @@ def _should_replace_transcript_segment(
         return True
 
     existing_text = str(existing_segment.get("text", "")).strip()
-    incoming_updated_at = _parse_optional_iso_datetime(str(incoming_segment.get("updated_at") or ""))
-    existing_updated_at = _parse_optional_iso_datetime(str(existing_segment.get("updated_at") or ""))
+    incoming_updated_at = _parse_optional_iso_datetime(
+        str(incoming_segment.get("updated_at") or "")
+    )
+    existing_updated_at = _parse_optional_iso_datetime(
+        str(existing_segment.get("updated_at") or "")
+    )
 
     if incoming_updated_at and existing_updated_at:
         if incoming_updated_at > existing_updated_at:
@@ -181,13 +200,19 @@ def _should_log_transcript_update(
     return True
 
 
-def _log_transcript_line(meeting_id: int, speaker: str, text: str, is_immutable: bool) -> None:
+def _log_transcript_line(
+    meeting_id: int, speaker: str, text: str, is_immutable: bool
+) -> None:
     phase = "final" if is_immutable else "live"
     compact_text = " ".join(text.split())
-    print(f"[Vexa Transcript] meeting={meeting_id} phase={phase} speaker={speaker}: {compact_text}")
+    print(
+        f"[Vexa Transcript] meeting={meeting_id} phase={phase} speaker={speaker}: {compact_text}"
+    )
 
 
-async def _emit_finalization_progress(meeting_id: int, done: asyncio.Event, source: str) -> None:
+async def _emit_finalization_progress(
+    meeting_id: int, done: asyncio.Event, source: str
+) -> None:
     elapsed = 0
     while not done.is_set():
         print(
@@ -195,7 +220,9 @@ async def _emit_finalization_progress(meeting_id: int, done: asyncio.Event, sour
             f"(source={source}, elapsed={elapsed}s)"
         )
         try:
-            await asyncio.wait_for(done.wait(), timeout=FINALIZATION_PROGRESS_INTERVAL_SECONDS)
+            await asyncio.wait_for(
+                done.wait(), timeout=FINALIZATION_PROGRESS_INTERVAL_SECONDS
+            )
             return
         except TimeoutError:
             elapsed += FINALIZATION_PROGRESS_INTERVAL_SECONDS
@@ -211,7 +238,9 @@ async def _finalize_completed_meeting(
 ) -> None:
     print(f"[Vexa] Starting finalization for meeting {meeting_id} (source={source})")
     progress_done = asyncio.Event()
-    progress_task = asyncio.create_task(_emit_finalization_progress(meeting_id, progress_done, source))
+    progress_task = asyncio.create_task(
+        _emit_finalization_progress(meeting_id, progress_done, source)
+    )
     started = time.monotonic()
 
     try:
@@ -221,7 +250,9 @@ async def _finalize_completed_meeting(
             native_id=native_id,
             api_key=api_key,
         )
-        print(f"[Vexa] Final transcript sync for meeting {meeting_id} upserted {upserted} chunks")
+        print(
+            f"[Vexa] Final transcript sync for meeting {meeting_id} upserted {upserted} chunks"
+        )
         await _generate_and_log_final_report(controller, meeting_id)
     finally:
         progress_done.set()
@@ -231,12 +262,16 @@ async def _finalize_completed_meeting(
     print(f"[Vexa] Finalization complete for meeting {meeting_id} in {duration}s")
 
 
-async def _generate_and_log_final_report(controller: ControllerAgent, meeting_id: int) -> None:
+async def _generate_and_log_final_report(
+    controller: ControllerAgent, meeting_id: int
+) -> None:
     with SessionLocal() as db:
         try:
             await controller.generate_final_report(meeting_id, db)
         except Exception as exc:  # noqa: BLE001
-            print(f"[Vexa] Failed to generate final report for meeting {meeting_id}: {type(exc).__name__}: {str(exc)}")
+            print(
+                f"[Vexa] Failed to generate final report for meeting {meeting_id}: {type(exc).__name__}: {str(exc)}"
+            )
 
 
 def _is_local_meeting_terminal(meeting_id: int) -> bool:
@@ -309,7 +344,9 @@ async def sync_final_transcript_from_vexa(
 ) -> int:
     vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
     if not vexa_api_key:
-        print(f"[Vexa] Cannot sync final transcript for meeting {meeting_id}: missing API key")
+        print(
+            f"[Vexa] Cannot sync final transcript for meeting {meeting_id}: missing API key"
+        )
         return 0
 
     base_url = _vexa_api_base_url()
@@ -321,7 +358,9 @@ async def sync_final_transcript_from_vexa(
         response.raise_for_status()
         payload: Any = response.json() if response.content else {}
     except httpx.HTTPError as exc:
-        print(f"[Vexa] Failed to fetch final transcript for meeting {meeting_id}: {exc}")
+        print(
+            f"[Vexa] Failed to fetch final transcript for meeting {meeting_id}: {exc}"
+        )
         return 0
 
     if not isinstance(payload, dict):
@@ -357,10 +396,14 @@ async def sync_final_transcript_from_vexa(
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if meeting is None:
-            print(f"[Vexa] Local meeting {meeting_id} not found during final transcript sync")
+            print(
+                f"[Vexa] Local meeting {meeting_id} not found during final transcript sync"
+            )
             return 0
 
-        db.execute(delete(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id))
+        db.execute(
+            delete(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id)
+        )
 
         for segment in canonical_segments:
             text = str(segment.get("text", "")).strip()
@@ -388,7 +431,9 @@ async def sync_final_transcript_from_vexa(
             db.commit()
         except SQLAlchemyError as exc:
             db.rollback()
-            print(f"[Vexa] Failed to persist final transcript for meeting {meeting_id}: {exc}")
+            print(
+                f"[Vexa] Failed to persist final transcript for meeting {meeting_id}: {exc}"
+            )
             return 0
 
     return inserted_count
@@ -420,7 +465,9 @@ async def monitor_meeting_until_terminal(
 
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(meetings_url, headers={"X-API-Key": vexa_api_key})
+                response = await client.get(
+                    meetings_url, headers={"X-API-Key": vexa_api_key}
+                )
             response.raise_for_status()
             payload: Any = response.json() if response.content else {}
         except httpx.HTTPError as exc:
@@ -449,10 +496,11 @@ async def monitor_meeting_until_terminal(
                 )
             return
 
-
         await asyncio.sleep(poll_interval)
 
-    print(f"[Vexa] Meeting poll timeout for meeting {meeting_id} after {timeout_seconds}s")
+    print(
+        f"[Vexa] Meeting poll timeout for meeting {meeting_id} after {timeout_seconds}s"
+    )
 
 
 async def poll_transcripts_from_vexa(
@@ -461,16 +509,21 @@ async def poll_transcripts_from_vexa(
     native_id: str,
     api_key: str | None = None,
     poll_interval: int = 15,
+    ws_manager: ConnectionManager | None = None,
 ) -> None:
     vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
     if not vexa_api_key:
-        print(f"[Vexa] VEXA_API_KEY is missing; transcript polling disabled for meeting {meeting_id}")
+        print(
+            f"[Vexa] VEXA_API_KEY is missing; transcript polling disabled for meeting {meeting_id}"
+        )
         return
 
     controller = ControllerAgent()
+    _seen_chunk_sigs[meeting_id] = _get_chunk_sigs(meeting_id)
 
     while not _is_local_meeting_terminal(meeting_id):
         try:
+            old_sigs = _seen_chunk_sigs.get(meeting_id, set())
             upserted = await sync_final_transcript_from_vexa(
                 meeting_id=meeting_id,
                 platform=platform,
@@ -478,7 +531,95 @@ async def poll_transcripts_from_vexa(
                 api_key=vexa_api_key,
             )
             if upserted > 0:
-                print(f"[Vexa] Synced {upserted} clean transcript segments for meeting {meeting_id}")
+                print(
+                    f"[Vexa] Synced {upserted} clean transcript segments for meeting {meeting_id}"
+                )
+
+                new_sigs = _get_chunk_sigs(meeting_id)
+                added_sigs = new_sigs - old_sigs
+                _seen_chunk_sigs[meeting_id] = new_sigs
+
+                if added_sigs:
+                    with SessionLocal() as db:
+                        chunks = (
+                            db.execute(
+                                select(TranscriptChunk)
+                                .where(TranscriptChunk.meeting_id == meeting_id)
+                                .order_by(TranscriptChunk.timestamp.asc())
+                            )
+                            .scalars()
+                            .all()
+                        )
+
+                    for c in chunks:
+                        sig = f"{c.speaker}|||{c.text.strip()}"
+                        if sig not in added_sigs:
+                            continue
+
+                        chunk_data = {
+                            "id": c.id,
+                            "speaker": c.speaker,
+                            "text": c.text,
+                            "timestamp": c.timestamp.isoformat(),
+                        }
+                        if ws_manager:
+                            await ws_manager.broadcast(
+                                meeting_id,
+                                {"event": "transcript_chunk", "data": chunk_data},
+                            )
+
+                        try:
+                            result = await controller.summarize(c.text)
+                            scrum = result.get("scrum_master", {})
+                            summary_text = scrum.get("text", "IGNORE")
+                            if (
+                                summary_text
+                                and summary_text.strip().upper() != "IGNORE"
+                                and ws_manager
+                            ):
+                                await ws_manager.broadcast(
+                                    meeting_id,
+                                    {
+                                        "event": "insight",
+                                        "data": {
+                                            "role": "scrum_master",
+                                            "text": summary_text,
+                                        },
+                                    },
+                                )
+
+                            proposal_data = scrum.get("proposal")
+                            if proposal_data and ws_manager:
+                                with SessionLocal() as db2:
+                                    agent_action = AgentAction(
+                                        meeting_id=meeting_id,
+                                        agent_role="scrum_master",
+                                        action_type=proposal_data["type"],
+                                        content=proposal_data["content"],
+                                        status="pending",
+                                    )
+                                    db2.add(agent_action)
+                                    db2.commit()
+                                    db2.refresh(agent_action)
+                                await ws_manager.broadcast(
+                                    meeting_id,
+                                    {
+                                        "event": "proposal",
+                                        "data": {
+                                            "id": agent_action.id,
+                                            "type": proposal_data["type"],
+                                            "content": proposal_data["content"],
+                                            "status": "pending",
+                                        },
+                                    },
+                                )
+                                print(
+                                    f"[Action Proposal] {proposal_data['type']}: {proposal_data['content']}"
+                                )
+                        except Exception as exc:
+                            print(
+                                f"[Vexa] Ollama analysis failed for chunk {c.id}: {exc}"
+                            )
         except Exception as exc:
             print(f"[Vexa] Transcript poll failed for meeting {meeting_id}: {exc}")
 
