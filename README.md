@@ -92,7 +92,7 @@ During live ingestion, the LLM can detect two kinds of proposals from each utter
 - **parking_lot** — speaker defers or tables a topic
 - **conflict** — speaker explicitly disagrees with a previous statement
 
-- `GET /api/meetings/{meeting_id}/actions` — Lists all detected proposals for a meeting, grouped by status.
+- `GET /api/meetings/{meeting_id}/actions` — Lists all proposals for a meeting, grouped by status.
   ```json
   {
     "pending": [
@@ -104,14 +104,23 @@ During live ingestion, the LLM can detect two kinds of proposals from each utter
         "status": "pending"
       }
     ],
-    "accepted": [],
+    "accepted": [
+      {
+        "id": 2,
+        "agent_role": "scrum_master",
+        "action_type": "conflict",
+        "content": "Disagrees with Bob on OAuth approach.",
+        "status": "accepted"
+      }
+    ],
     "rejected": []
   }
   ```
-- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Accept or reject a proposal.
-  - Body `{ "status": "accepted" }` sets the action status to `accepted`.
-  - Body `{ "status": "rejected" }` **deletes** the action row entirely.
-  - Returns `{"ok": true, "id": 1, "status": "accepted"}` or `{"ok": true, "deleted": 1}`.
+  `pending` are un-reviewed proposals. `accepted` have been approved. `rejected` is always empty because rejection deletes the row.
+
+- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Review a proposal.
+  - Body `{ "status": "accepted" }` — marks the action as accepted. Returns `{"ok": true, "id": 1, "status": "accepted"}`.
+  - Body `{ "status": "rejected" }` — **deletes** the action row entirely. Returns `{"ok": true, "deleted": 1}`.
 
 ### Transcripts
 
