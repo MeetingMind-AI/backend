@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.websockets import router as websocket_router
 from app.db.models import Meeting, TranscriptChunk
 from app.db.session import SessionLocal
+from app.engine.controller import ControllerAgent
 from app.engine.vexa_client import (
     TERMINAL_MEETING_STATUSES,
     poll_transcripts_from_vexa,
@@ -34,6 +35,11 @@ class MeetingStartRequest(BaseModel):
 
 class MeetingRenameRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
+
+
+class ClarityRequest(BaseModel):
+    mode: str = Field(pattern="^(technical|business)$", default="technical")
+    last_x_minutes: int | None = Field(default=None, ge=1)
 
 
 def _find_local_meeting_id(vexa_meeting_id: str | None, platform: str, native_id: str) -> int | None:
@@ -183,6 +189,24 @@ async def leave_meeting(meeting_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"Failed to contact Vexa service: {exc}") from exc
 
     return {"ok": True}
+
+
+@app.post("/api/meetings/{meeting_id}/explain")
+async def explain_meeting(meeting_id: int, request: ClarityRequest) -> dict[str, str]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+
+        controller = ControllerAgent()
+        explanation = await controller.generate_instant_clarity(
+            meeting_id=meeting_id,
+            db_session=db,
+            mode=request.mode,
+            last_x_minutes=request.last_x_minutes,
+        )
+
+    return {"explanation": explanation}
 
 
 @app.post("/api/vexa/webhook")

@@ -141,3 +141,26 @@ DISCUSSION_PERSONA_PROMPTS = {
     "tech_lead": DISCUSSION_TECH_LEAD_PROMPT,
     "product_manager": DISCUSSION_PRODUCT_MANAGER_PROMPT,
 }
+
+# ---------------------------------------------------------------------------
+# Instant Clarity prompts (used during live meeting for immediate simplification)
+# ---------------------------------------------------------------------------
+
+INSTANT_CLARITY_TECHNICAL = (
+    "You are a Senior Engineer acting as a mentor. "
+    "Simplify and explain the following recent meeting transcript "
+    "so that a junior developer or non-technical stakeholder can immediately understand "
+    "the core technical context, architecture terms, and engineering concepts being discussed. "
+    "Keep it extremely concise (1-2 paragraphs). Do not formulate it as an email or a formal report — "
+    "just give the immediate technical clarification."
+)
+
+INSTANT_CLARITY_BUSINESS = (
+    "You are an Executive Product Manager. "
+    "Simplify and explain the following recent meeting transcript "
+    "so that a stakeholder can immediately understand the business value, "
+    "product goals, risks, and strategic decisions being discussed. "
+    "Keep it extremely concise (1-2 paragraphs). Do not formulate it as an email or a formal report — "
+    "just give the immediate business clarification."
+)
+

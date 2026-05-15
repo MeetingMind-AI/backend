@@ -29,6 +29,10 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
   - Runs `poll_transcripts_from_vexa` and `monitor_meeting_until_terminal` concurrently via `asyncio.gather`
 - `POST /api/meetings/{meeting_id}/leave`
   - Force bot to leave meeting via Vexa bot delete API
+- `POST /api/meetings/{meeting_id}/explain`
+  - Body: `{ "mode": "technical", "last_x_minutes": 2 }`
+  - Provides a real-time AI simplification of the recent transcript using a "technical" or "business" persona.
+  - Generates explanations without derailing the websocket transmission track.
 - `POST /api/vexa/webhook`
   - Receives Vexa lifecycle events for fallback completion sync
 

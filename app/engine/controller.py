@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import os
 
@@ -14,6 +15,8 @@ from app.engine.prompts import (
     INITIAL_ANALYSIS_PROMPTS,
     SYNTHESIS_PROMPT,
     DISCUSSION_PERSONA_PROMPTS,
+    INSTANT_CLARITY_BUSINESS,
+    INSTANT_CLARITY_TECHNICAL,
 )
 
 DEFAULT_DISCUSSION_ROUNDS = 1
@@ -221,6 +224,27 @@ class TranscriptLoader:
             lines.append(f"{speaker}: {text}")
         return "\n".join(lines).strip()
 
+    @staticmethod
+    def load_recent(meeting_id: int, db: Session, last_x_minutes: int | None = None) -> str:
+        ordering = getattr(TranscriptChunk, "start_time", TranscriptChunk.timestamp)
+        stmt = select(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id)
+        
+        if last_x_minutes is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=last_x_minutes)
+            stmt = stmt.where(TranscriptChunk.timestamp >= cutoff)
+            
+        stmt = stmt.order_by(ordering.asc())
+        chunks = db.execute(stmt).scalars().all()
+        
+        lines: list[str] = []
+        for chunk in chunks:
+            text = str(chunk.text or "").strip()
+            if not text:
+                continue
+            speaker = str(chunk.speaker or "Unknown").strip() or "Unknown"
+            lines.append(f"{speaker}: {text}")
+        return "\n".join(lines).strip()
+
 
 # ---------------------------------------------------------------------------
 # Controller  (orchestrator — ties everything together)
@@ -264,6 +288,32 @@ class ControllerAgent:
             *[_run(r, p) for r, p in REALTIME_PERSONA_PROMPTS.items()]
         )
         return dict(results)
+
+    # -- Instant Clarity ---------------------------------------------------
+
+    async def generate_instant_clarity(
+        self,
+        meeting_id: int,
+        db_session: Session,
+        mode: str,
+        last_x_minutes: int | None = None,
+    ) -> str:
+        transcript_context = TranscriptLoader.load_recent(meeting_id, db_session, last_x_minutes)
+        if not transcript_context:
+            return "No transcript data available for this meeting to explain."
+            
+        system_prompt = INSTANT_CLARITY_BUSINESS if mode.lower() == "business" else INSTANT_CLARITY_TECHNICAL
+            
+        prompt = (
+            f"Here is the meeting transcript context:\n"
+            f"{transcript_context}\n\n"
+            f"Please provide your instant clarification based on the rules above."
+        )
+        try:
+            return await self._llm.generate(prompt=prompt, system_prompt=system_prompt)
+        except Exception as exc:
+            print(f"[ControllerAgent] Instant Clarity failed: {exc}")
+            return "Failed to generate instant clarity due to an internal error."
 
     # -- Final report ------------------------------------------------------
 
