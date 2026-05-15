@@ -508,7 +508,7 @@ async def poll_transcripts_from_vexa(
     platform: str,
     native_id: str,
     api_key: str | None = None,
-    poll_interval: int = 15,
+    poll_interval: int = 3,
     ws_manager: ConnectionManager | None = None,
 ) -> None:
     vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
