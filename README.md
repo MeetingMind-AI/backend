@@ -20,21 +20,135 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 
 ## Service Endpoints
 
-- `GET /health`
+### Health
+
+- `GET /health` — Liveness probe.
+  ```json
+  {"status": "ok"}
+  ```
+
+### Meeting Lifecycle
+
 - `POST /api/meetings/start`
   - Body: `{ "platform": "<platform>", "native_id": "<meeting-id>" }`
   - Supported `platform` values: `google_meet`, `zoom`, `teams`
-  - Starts a Vexa bot for a target platform/native meeting ID
-  - Upserts the meeting record (re-uses existing row if `vexa_meeting_id` already exists)
-  - Runs `poll_transcripts_from_vexa` and `monitor_meeting_until_terminal` concurrently via `asyncio.gather`
+  - Deploys a Vexa bot to join the meeting. Upserts the meeting record (re-uses existing row if `vexa_meeting_id` already exists). Schedules background tasks to poll transcripts and monitor the meeting lifecycle until completion. Returns `{"meeting_id": ...}`.
+
 - `POST /api/meetings/{meeting_id}/leave`
-  - Force bot to leave meeting via Vexa bot delete API
+  - Instructs the Vexa bot to leave the meeting via the Vexa bot DELETE API. Returns `{"ok": True}`.
+
+### AI Explanations
+
 - `POST /api/meetings/{meeting_id}/explain`
   - Body: `{ "mode": "technical", "last_x_minutes": 2 }`
-  - Provides a real-time AI simplification of the recent transcript using a "technical" or "business" persona.
-  - Generates explanations without derailing the websocket transmission track.
+  - Generates an LLM-powered "instant clarity" explanation of recent transcript content. Supports `"technical"` or `"business"` personas. Filters by `last_x_minutes` if provided.
+
+### Vexa Webhook
+
 - `POST /api/vexa/webhook`
-  - Receives Vexa lifecycle events for fallback completion sync
+  - Receives Vexa lifecycle events (`meeting.status_change`, `meeting.completed`, etc.). Validates an optional Bearer token, updates meeting status in the local DB, and schedules a final transcript sync if the meeting reached a terminal status.
+
+### Meeting CRUD
+
+- `GET /api/meetings` — Lists all meetings ordered by `created_at` descending.
+  ```json
+  {
+    "meetings": [
+      {
+        "id": 1,
+        "title": "Sprint Planning",
+        "status": "completed",
+        "summary": {
+          "tech_lead": "{...}",
+          "product_manager": "{...}",
+          "scrum_master": "{\"summary\": \"...\", \"pending_to_schedule\": [], \"parking_lot\": [], \"to_do\": []}"
+        },
+        "created_at": "2026-05-15T10:00:00+00:00"
+      }
+    ]
+  }
+  ```
+- `GET /api/meetings/{meeting_id}` — Retrieves a single meeting by its local DB id.
+  ```json
+  {
+    "id": 1,
+    "title": "Sprint Planning",
+    "status": "completed",
+    "summary": {
+      "tech_lead": "{...}",
+      "product_manager": "{...}",
+      "scrum_master": "{\"summary\": \"...\", \"pending_to_schedule\": [], \"parking_lot\": [], \"to_do\": []}"
+    },
+    "created_at": "2026-05-15T10:00:00+00:00"
+  }
+  ```
+  Returns `404` if not found.
+- `PATCH /api/meetings/{meeting_id}` — Renames a meeting. Body: `{ "title": "new title" }`. Returns `{"id": ..., "title": ...}`.
+- `DELETE /api/meetings/{meeting_id}` — Deletes a meeting record. Returns `{"ok": True}`. Returns `404` if not found.
+
+### Proposals (Parking Lot / Conflict)
+
+During live ingestion, the LLM can detect two kinds of proposals from each utterance and persists them as pending `AgentAction` rows:
+- **parking_lot** — speaker defers or tables a topic
+- **conflict** — speaker explicitly disagrees with a previous statement
+
+- `GET /api/meetings/{meeting_id}/actions` — Lists all detected proposals for a meeting, grouped by status.
+  ```json
+  {
+    "pending": [
+      {
+        "id": 1,
+        "agent_role": "scrum_master",
+        "action_type": "parking_lot",
+        "content": "Framework decision deferred to separate discussion.",
+        "status": "pending"
+      }
+    ],
+    "accepted": [],
+    "rejected": []
+  }
+  ```
+- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Accept or reject a proposal.
+  - Body `{ "status": "accepted" }` sets the action status to `accepted`.
+  - Body `{ "status": "rejected" }` **deletes** the action row entirely.
+  - Returns `{"ok": true, "id": 1, "status": "accepted"}` or `{"ok": true, "deleted": 1}`.
+
+### Transcripts
+
+- `GET /api/meetings/{meeting_id}/transcript` — Fetches all transcript chunks for a meeting, ordered by timestamp ascending.
+  ```json
+  {
+    "meeting_id": 1,
+    "status": "completed",
+    "chunks": [
+      {
+        "id": 42,
+        "speaker": "Alice",
+        "text": "Let's review the API design",
+        "timestamp": "2026-05-15T10:05:00+00:00"
+      }
+    ]
+  }
+  ```
+
+### WebSocket
+
+- `WS /api/ws/ingest/{meeting_id}` — Accepts a WebSocket connection for live transcript ingestion. Send JSON `{"speaker": "Alice", "text": "..."}`. The server persists the chunk, runs a single LLM call for both summarization and proposal detection, and responds with:
+  ```json
+  {
+    "ok": true,
+    "meeting_id": 1,
+    "chunk_id": 42,
+    "summary": "Alice assigned to API documentation.",
+    "proposal": {
+      "id": 1,
+      "type": "parking_lot",
+      "content": "Framework decision deferred to separate discussion.",
+      "status": "pending"
+    }
+  }
+  ```
+  The `proposal` field is omitted when the LLM detects nothing worth flagging.
 
 Interactive docs:
 
@@ -75,7 +189,7 @@ Stores high-level metadata about meetings orchestrated by Vexa.
 | `vexa_meeting_id` | `String(128)` | Unique, Indexed | The meeting ID returned from the Vexa service. |
 | `title` | `String(255)` | | The fallback or true title of the meeting. |
 | `status` | `String(64)` | `'pending'` | The meeting lifecycle status (e.g. `active`, `completed`). |
-| `final_summary` | `JSONB` | `NULL` | The generated final structured JSON report from Ollama (keys: `summary`, `action_items`, `blockers`). |
+| `summary` | `JSONB` | `NULL` | The generated final report from Ollama: dict with `tech_lead`, `product_manager`, and `scrum_master` keys. The `scrum_master` value is a JSON string with keys `summary`, `pending_to_schedule`, `parking_lot`, and `to_do`. |
 | `created_at` | `DateTime` | `now()` | Local timestamp of when the meeting record was created. |
 
 #### 2. `transcript_chunks` Table

@@ -28,6 +28,7 @@ DISCUSSION_ROLES = ("tech_lead", "product_manager")
 # Low-level LLM client
 # ---------------------------------------------------------------------------
 
+
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -74,6 +75,7 @@ class OllamaClient:
 # Discussion engine  (Tech Lead ↔ Product Manager debate)
 # ---------------------------------------------------------------------------
 
+
 class DiscussionEngine:
     """Orchestrates multi-round discussions between personas."""
 
@@ -94,7 +96,11 @@ class DiscussionEngine:
             print(f"[Discussion] meeting={meeting_id} round {round_num}/{num_rounds}")
 
             context = self._build_context(
-                meeting_id, transcript, initial_reports, log, round_num,
+                meeting_id,
+                transcript,
+                initial_reports,
+                log,
+                round_num,
             )
 
             tasks = [
@@ -108,7 +114,9 @@ class DiscussionEngine:
                 entry[role] = response
                 preview = " ".join(response.split())[:200]
                 label = role.replace("_", " ").title()
-                print(f"[Discussion] meeting={meeting_id} round={round_num} {label}: {preview}...")
+                print(
+                    f"[Discussion] meeting={meeting_id} round={round_num} {label}: {preview}..."
+                )
 
             log.append(entry)
 
@@ -117,8 +125,12 @@ class DiscussionEngine:
     # -- private helpers ---------------------------------------------------
 
     async def _discuss(
-        self, role: str, sys_prompt: str, context: str,
-        meeting_id: int, round_num: int,
+        self,
+        role: str,
+        sys_prompt: str,
+        context: str,
+        meeting_id: int,
+        round_num: int,
     ) -> tuple[str, str]:
         try:
             result = await self._llm.generate(prompt=context, system_prompt=sys_prompt)
@@ -151,16 +163,23 @@ class DiscussionEngine:
                 parts.append(f"--- Round {entry.get('round', '?')} ---")
                 for role in DISCUSSION_ROLES:
                     if role in entry:
-                        parts += [f"[{role.replace('_', ' ').title()}]:", entry[role], ""]
+                        parts += [
+                            f"[{role.replace('_', ' ').title()}]:",
+                            entry[role],
+                            "",
+                        ]
 
-        parts += [f"\n=== YOUR TURN: Discussion Round {current_round} ===",
-                  "Review all the above and respond according to your role's discussion format."]
+        parts += [
+            f"\n=== YOUR TURN: Discussion Round {current_round} ===",
+            "Review all the above and respond according to your role's discussion format.",
+        ]
         return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
 # Report builder  (prompt assembly — no LLM calls, no DB)
 # ---------------------------------------------------------------------------
+
 
 class ReportPromptBuilder:
     """Assembles the final Scrum Master synthesis prompt."""
@@ -200,6 +219,7 @@ class ReportPromptBuilder:
 # Transcript loader  (DB read — no LLM, no prompts)
 # ---------------------------------------------------------------------------
 
+
 class TranscriptLoader:
     """Reads transcript chunks from the database."""
 
@@ -225,17 +245,19 @@ class TranscriptLoader:
         return "\n".join(lines).strip()
 
     @staticmethod
-    def load_recent(meeting_id: int, db: Session, last_x_minutes: int | None = None) -> str:
+    def load_recent(
+        meeting_id: int, db: Session, last_x_minutes: int | None = None
+    ) -> str:
         ordering = getattr(TranscriptChunk, "start_time", TranscriptChunk.timestamp)
         stmt = select(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id)
-        
+
         if last_x_minutes is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=last_x_minutes)
             stmt = stmt.where(TranscriptChunk.timestamp >= cutoff)
-            
+
         stmt = stmt.order_by(ordering.asc())
         chunks = db.execute(stmt).scalars().all()
-        
+
         lines: list[str] = []
         for chunk in chunks:
             text = str(chunk.text or "").strip()
@@ -250,6 +272,7 @@ class TranscriptLoader:
 # Controller  (orchestrator — ties everything together)
 # ---------------------------------------------------------------------------
 
+
 class ControllerAgent:
     """High-level orchestrator for real-time summaries and final reports."""
 
@@ -262,27 +285,37 @@ class ControllerAgent:
         self._llm = OllamaClient(url=ollama_url, model=model, timeout=timeout)
         self._discussion = DiscussionEngine(self._llm)
 
-    # -- Real-time summarisation -------------------------------------------
+    # -- Real-time summarisation + proposal detection --------------------
 
-    async def summarize(self, text: str) -> dict[str, str]:
+    async def summarize(self, text: str) -> dict[str, dict]:
         cleaned = " ".join(text.split()).strip()
         if not cleaned:
-            return {role: "IGNORE" for role in REALTIME_PERSONA_PROMPTS}
+            return {
+                role: {"text": "IGNORE", "proposal": None}
+                for role in REALTIME_PERSONA_PROMPTS
+            }
 
         prompt = (
             f"Transcript:\n{cleaned}\n\n"
-            "If this contains meaningful information for your role, return one concise sentence. "
-            "Otherwise return IGNORE."
+            "Analyze the utterance above and respond with the JSON format specified in your instructions."
         )
 
-        async def _run(role: str, sys_prompt: str) -> tuple[str, str]:
+        async def _run(role: str, sys_prompt: str) -> tuple[str, dict]:
             try:
                 raw = await self._llm.generate(prompt=prompt, system_prompt=sys_prompt)
-                normalised = " ".join(raw.split())
-                return role, ("IGNORE" if normalised.upper() == "IGNORE" else normalised)
+                raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
+                result = json.loads(raw)
+                summary = result.get("summary", "IGNORE")
+                proposal = result.get("proposal")
+                if proposal is not None and proposal.get("type") not in (
+                    "parking_lot",
+                    "conflict",
+                ):
+                    proposal = None
+                return role, {"text": summary, "proposal": proposal}
             except Exception as exc:
                 print(f"[ControllerAgent] Persona {role} failed: {exc}")
-                return role, "IGNORE"
+                return role, {"text": "IGNORE", "proposal": None}
 
         results = await asyncio.gather(
             *[_run(r, p) for r, p in REALTIME_PERSONA_PROMPTS.items()]
@@ -298,16 +331,26 @@ class ControllerAgent:
         mode: str,
         last_x_minutes: int | None = None,
     ) -> str:
-        transcript_context = TranscriptLoader.load_recent(meeting_id, db_session, last_x_minutes)
+        transcript_context = TranscriptLoader.load_recent(
+            meeting_id, db_session, last_x_minutes
+        )
         if not transcript_context:
             return "No transcript data available for this meeting to explain."
-            
-        system_prompt = INSTANT_CLARITY_BUSINESS if mode.lower() == "business" else INSTANT_CLARITY_TECHNICAL
-            
+
+        word_count = len(transcript_context.split())
+        if word_count < 10:
+            return "The transcript is too short to generate a meaningful clarification."
+
+        system_prompt = (
+            INSTANT_CLARITY_BUSINESS
+            if mode.lower() == "business"
+            else INSTANT_CLARITY_TECHNICAL
+        )
+
         prompt = (
             f"Here is the meeting transcript context:\n"
             f"{transcript_context}\n\n"
-            f"Please provide your instant clarification based on the rules above."
+            f"Provide your instant clarification strictly based only on the transcript lines above."
         )
         try:
             return await self._llm.generate(prompt=prompt, system_prompt=system_prompt)
@@ -341,7 +384,9 @@ class ControllerAgent:
         # 3. Discussion rounds (Tech Lead ↔ PM)
         discussion_log: list[dict[str, str]] = []
         if num_rounds > 0:
-            print(f"[Final Report] meeting={meeting_id} starting {num_rounds}-round discussion")
+            print(
+                f"[Final Report] meeting={meeting_id} starting {num_rounds}-round discussion"
+            )
             discussion_log = await self._discussion.run(
                 meeting_id=meeting_id,
                 initial_reports=initial_reports,
@@ -351,10 +396,14 @@ class ControllerAgent:
 
         # 4. Scrum Master synthesis
         synthesis_prompt = ReportPromptBuilder.build(
-            meeting_id, initial_reports, transcript, discussion_log,
+            meeting_id,
+            initial_reports,
+            transcript,
+            discussion_log,
         )
         scrum_master_result = await self._llm.generate(
-            prompt=synthesis_prompt, system_prompt=SYNTHESIS_PROMPT,
+            prompt=synthesis_prompt,
+            system_prompt=SYNTHESIS_PROMPT,
         )
 
         # 5. Assemble and persist
@@ -374,7 +423,9 @@ class ControllerAgent:
     async def _run_initial_analyses(self, prompt: str) -> dict[str, str]:
         async def _fetch(role: str, sys_prompt: str) -> tuple[str, str]:
             try:
-                return role, await self._llm.generate(prompt=prompt, system_prompt=sys_prompt)
+                return role, await self._llm.generate(
+                    prompt=prompt, system_prompt=sys_prompt
+                )
             except Exception as exc:
                 print(f"[Final Report] Persona {role} failed: {exc}")
                 return role, "{}"

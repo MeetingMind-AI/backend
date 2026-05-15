@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.websockets import router as websocket_router
-from app.db.models import Meeting, TranscriptChunk
+from app.db.models import AgentAction, Meeting, TranscriptChunk
 from app.db.session import SessionLocal
 from app.engine.controller import ControllerAgent
 from app.engine.vexa_client import (
@@ -42,10 +42,16 @@ class ClarityRequest(BaseModel):
     last_x_minutes: int | None = Field(default=None, ge=1)
 
 
-def _find_local_meeting_id(vexa_meeting_id: str | None, platform: str, native_id: str) -> int | None:
+def _find_local_meeting_id(
+    vexa_meeting_id: str | None, platform: str, native_id: str
+) -> int | None:
     with SessionLocal() as db:
         if vexa_meeting_id:
-            by_vexa_stmt = select(Meeting.id).where(Meeting.vexa_meeting_id == vexa_meeting_id).limit(1)
+            by_vexa_stmt = (
+                select(Meeting.id)
+                .where(Meeting.vexa_meeting_id == vexa_meeting_id)
+                .limit(1)
+            )
             by_vexa_result = db.execute(by_vexa_stmt).scalar_one_or_none()
             if by_vexa_result is not None:
                 return int(by_vexa_result)
@@ -80,7 +86,9 @@ def _get_local_meeting_context(local_meeting_id: int) -> tuple[str, str]:
 
 
 @app.post("/api/meetings/start")
-async def start_meeting(request: MeetingStartRequest, background_tasks: BackgroundTasks) -> dict[str, int]:
+async def start_meeting(
+    request: MeetingStartRequest, background_tasks: BackgroundTasks
+) -> dict[str, int]:
     bot_payload = {
         "platform": request.platform,
         "native_meeting_id": request.native_id,
@@ -105,12 +113,18 @@ async def start_meeting(request: MeetingStartRequest, background_tasks: Backgrou
             )
         bot_response.raise_for_status()
         raw_bot_data: Any = bot_response.json() if bot_response.content else {}
-        deployed_bot_data: dict[str, Any] = raw_bot_data if isinstance(raw_bot_data, dict) else {}
+        deployed_bot_data: dict[str, Any] = (
+            raw_bot_data if isinstance(raw_bot_data, dict) else {}
+        )
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text or "Failed to deploy Vexa bot"
-        raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+        raise HTTPException(
+            status_code=exc.response.status_code, detail=detail
+        ) from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to contact Vexa bot service: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Failed to contact Vexa bot service: {exc}"
+        ) from exc
 
     vexa_meeting_id = str(
         deployed_bot_data.get("id")
@@ -118,12 +132,16 @@ async def start_meeting(request: MeetingStartRequest, background_tasks: Backgrou
         or deployed_bot_data.get("vexa_meeting_id")
         or f"{request.platform}:{request.native_id}:{uuid.uuid4().hex}"
     )
-    title = str(deployed_bot_data.get("title") or f"{request.platform}:{request.native_id}")
+    title = str(
+        deployed_bot_data.get("title") or f"{request.platform}:{request.native_id}"
+    )
     status = str(deployed_bot_data.get("status") or "requested")
 
     with SessionLocal() as db:
         # 1. Check if the meeting already exists
-        existing_stmt = select(Meeting).where(Meeting.vexa_meeting_id == vexa_meeting_id).limit(1)
+        existing_stmt = (
+            select(Meeting).where(Meeting.vexa_meeting_id == vexa_meeting_id).limit(1)
+        )
         meeting = db.execute(existing_stmt).scalar_one_or_none()
 
         if meeting:
@@ -144,12 +162,18 @@ async def start_meeting(request: MeetingStartRequest, background_tasks: Backgrou
             db.refresh(meeting)
         except SQLAlchemyError as exc:
             db.rollback()
-            raise HTTPException(status_code=500, detail=f"Failed to create/update meeting: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"Failed to create/update meeting: {exc}"
+            ) from exc
 
     async def run_meeting_tasks():
         await asyncio.gather(
-            poll_transcripts_from_vexa(meeting.id, request.platform, request.native_id, vexa_api_key),
-            monitor_meeting_until_terminal(meeting.id, request.platform, request.native_id, vexa_api_key)
+            poll_transcripts_from_vexa(
+                meeting.id, request.platform, request.native_id, vexa_api_key
+            ),
+            monitor_meeting_until_terminal(
+                meeting.id, request.platform, request.native_id, vexa_api_key
+            ),
         )
 
     background_tasks.add_task(run_meeting_tasks)
@@ -166,7 +190,10 @@ async def leave_meeting(meeting_id: int) -> dict[str, Any]:
 
         platform, native_id = _get_local_meeting_context(meeting_id)
         if not platform or not native_id:
-            raise HTTPException(status_code=400, detail="Cannot determine platform/native_id for meeting")
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot determine platform/native_id for meeting",
+            )
 
     vexa_api_key = os.getenv("VEXA_API_KEY", "")
     if not vexa_api_key:
@@ -184,9 +211,14 @@ async def leave_meeting(meeting_id: int) -> dict[str, Any]:
             )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text or "Failed to leave meeting") from exc
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=exc.response.text or "Failed to leave meeting",
+        ) from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to contact Vexa service: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Failed to contact Vexa service: {exc}"
+        ) from exc
 
     return {"ok": True}
 
@@ -220,7 +252,9 @@ async def handle_vexa_webhook(
         auth_header = request.headers.get("authorization", "")
         expected_header = f"Bearer {webhook_secret}"
         if auth_header != expected_header:
-            raise HTTPException(status_code=401, detail="Invalid webhook Authorization header")
+            raise HTTPException(
+                status_code=401, detail="Invalid webhook Authorization header"
+            )
 
     raw_event_type = str(event.get("event_type") or event.get("event") or "").strip()
     event_type = raw_event_type.lower()
@@ -229,7 +263,10 @@ async def handle_vexa_webhook(
 
     meeting_payload = event.get("meeting")
     if not isinstance(meeting_payload, dict):
-        raise HTTPException(status_code=422, detail="meeting payload is required for status change events")
+        raise HTTPException(
+            status_code=422,
+            detail="meeting payload is required for status change events",
+        )
 
     platform = str(meeting_payload.get("platform") or "").strip()
     native_id = str(meeting_payload.get("native_meeting_id") or "").strip()
@@ -265,7 +302,9 @@ async def handle_vexa_webhook(
         update_meeting_status(local_meeting_id, status_to)
 
     if not platform or not native_id:
-        fallback_platform, fallback_native_id = _get_local_meeting_context(local_meeting_id)
+        fallback_platform, fallback_native_id = _get_local_meeting_context(
+            local_meeting_id
+        )
         platform = platform or fallback_platform
         native_id = native_id or fallback_native_id
 
@@ -320,7 +359,9 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
             "title": meeting.title,
             "status": meeting.status,
             "summary": meeting.summary,
-            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+            "created_at": meeting.created_at.isoformat()
+            if meeting.created_at
+            else None,
         }
 
 
@@ -335,7 +376,9 @@ def rename_meeting(meeting_id: int, request: MeetingRenameRequest) -> dict[str, 
             db.commit()
         except SQLAlchemyError as exc:
             db.rollback()
-            raise HTTPException(status_code=500, detail=f"Failed to rename meeting: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"Failed to rename meeting: {exc}"
+            ) from exc
     return {"id": meeting_id, "title": request.title}
 
 
@@ -350,7 +393,9 @@ def delete_meeting_record(meeting_id: int) -> dict[str, Any]:
             db.commit()
         except SQLAlchemyError as exc:
             db.rollback()
-            raise HTTPException(status_code=500, detail=f"Failed to delete meeting: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"Failed to delete meeting: {exc}"
+            ) from exc
     return {"ok": True}
 
 
@@ -382,6 +427,77 @@ def get_transcript(meeting_id: int) -> dict[str, Any]:
                 for c in chunks
             ],
         }
+
+
+@app.get("/api/meetings/{meeting_id}/actions")
+def list_actions(meeting_id: int) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        rows = (
+            db.execute(
+                select(AgentAction)
+                .where(AgentAction.meeting_id == meeting_id)
+                .order_by(AgentAction.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        pending: list[dict[str, Any]] = []
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for a in rows:
+            entry = {
+                "id": a.id,
+                "agent_role": a.agent_role,
+                "action_type": a.action_type,
+                "content": a.content,
+                "status": a.status,
+            }
+            if a.status == "accepted":
+                accepted.append(entry)
+            elif a.status == "rejected":
+                rejected.append(entry)
+            else:
+                pending.append(entry)
+        return {"pending": pending, "accepted": accepted, "rejected": rejected}
+
+
+class ActionReviewRequest(BaseModel):
+    status: str = Field(pattern="^(accepted|rejected)$")
+
+
+@app.patch("/api/meetings/{meeting_id}/actions/{action_id}")
+def review_action(
+    meeting_id: int, action_id: int, request: ActionReviewRequest
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        action = db.get(AgentAction, action_id)
+        if not action or action.meeting_id != meeting_id:
+            raise HTTPException(status_code=404, detail="Action not found")
+        if request.status == "rejected":
+            db.delete(action)
+            try:
+                db.commit()
+            except SQLAlchemyError as exc:
+                db.rollback()
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to delete action: {exc}"
+                ) from exc
+            return {"ok": True, "deleted": action_id}
+        action.status = "accepted"
+        try:
+            db.commit()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=500, detail=f"Failed to update action: {exc}"
+            ) from exc
+    return {"ok": True, "id": action_id, "status": "accepted"}
 
 
 @app.get("/health", tags=["health"])

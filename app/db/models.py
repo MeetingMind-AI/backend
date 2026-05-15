@@ -13,7 +13,9 @@ class Meeting(Base):
     __tablename__ = "meetings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    vexa_meeting_id: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
+    vexa_meeting_id: Mapped[str] = mapped_column(
+        String(128), unique=True, index=True, nullable=False
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(
         String(64),
@@ -68,5 +70,8 @@ class AgentAction(Base):
     agent_role: Mapped[str] = mapped_column(String(120), nullable=False)
     action_type: Mapped[str] = mapped_column(String(120), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
 
     meeting: Mapped[Meeting] = relationship(back_populates="agent_actions")
