@@ -42,6 +42,12 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 - `POST /api/meetings/{meeting_id}/explain`
   - Body: `{ "mode": "technical", "last_x_minutes": 2 }`
   - Generates an LLM-powered "instant clarity" explanation of recent transcript content. Supports `"technical"` or `"business"` personas. Filters by `last_x_minutes` if provided.
+  - Response:
+    ```json
+    {
+      "explanation": "The team discussed the API authentication refactor. Bob suggested OAuth2, but Alice raised concerns about complexity. They agreed to spike it next sprint."
+    }
+    ```
 
 ### Vexa Webhook
 
@@ -116,11 +122,11 @@ During live ingestion, the LLM can detect two kinds of proposals from each utter
     "rejected": []
   }
   ```
-  `pending` are un-reviewed proposals. `accepted` have been approved. `rejected` is always empty because rejection deletes the row.
+  `pending` are un-reviewed proposals. `accepted` have been approved. `rejected` have been dismissed.
 
 - `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Review a proposal.
   - Body `{ "status": "accepted" }` — marks the action as accepted. Returns `{"ok": true, "id": 1, "status": "accepted"}`.
-  - Body `{ "status": "rejected" }` — **deletes** the action row entirely. Returns `{"ok": true, "deleted": 1}`.
+  - Body `{ "status": "rejected" }` — marks the action as rejected. Returns `{"ok": true, "id": 1, "status": "rejected"}`.
 
 ### Transcripts
 

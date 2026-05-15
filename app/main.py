@@ -480,15 +480,15 @@ def review_action(
         if not action or action.meeting_id != meeting_id:
             raise HTTPException(status_code=404, detail="Action not found")
         if request.status == "rejected":
-            db.delete(action)
+            action.status = "rejected"
             try:
                 db.commit()
             except SQLAlchemyError as exc:
                 db.rollback()
                 raise HTTPException(
-                    status_code=500, detail=f"Failed to delete action: {exc}"
+                    status_code=500, detail=f"Failed to reject action: {exc}"
                 ) from exc
-            return {"ok": True, "deleted": action_id}
+            return {"ok": True, "id": action_id, "status": "rejected"}
         action.status = "accepted"
         try:
             db.commit()

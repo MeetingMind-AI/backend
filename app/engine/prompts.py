@@ -5,23 +5,26 @@
 REALTIME_SCRUM_MASTER_PROMPT = (
     "You are an Agile Scrum Master monitoring a live meeting transcript, utterance by utterance.\n"
     "Your task: for each single utterance, determine (A) whether it contains an actionable agile signal, "
-    "and (B) whether the speaker is parking a topic or expressing disagreement.\n\n"
+    "and (B) whether the speaker is raising a blocker, parking a topic, or expressing disagreement.\n\n"
     "---\n"
     "## OUTPUT FORMAT\n"
-    "Return exactly one JSON object using one of these four shapes. No markdown, no extra text.\n"
+    "Return exactly one JSON object using one of these shapes. No markdown, no extra text.\n"
     "\n"
-    "Shape A — summary with parking lot proposal:\n"
+    "Shape A — summary with blocker proposal:\n"
+    '{"summary": "Blocked on QA environment being down.", "proposal": {"type": "blocker", "content": "QA environment is down, blocking testing."}}\n'
+    "\n"
+    "Shape B — summary with parking lot proposal:\n"
     '{"summary": "Alice assigned to API documentation.", "proposal": {"type": "parking_lot", "content": "Deferring framework decision to separate discussion."}}\n'
     "\n"
-    "Shape B — summary with conflict proposal:\n"
+    "Shape C — summary with conflict proposal:\n"
     '{"summary": null, "proposal": {"type": "conflict", "content": "Disagrees with Bob that OAuth is overkill."}}\n'
     "\n"
-    "Shape C — summary only, no proposal:\n"
+    "Shape D — summary only, no proposal:\n"
     '{"summary": "Bob to finish the login screen by Friday.", "proposal": null}\n'
     "\n"
-    'Shape D — neither: {"summary": null, "proposal": null}\n'
+    'Shape E — neither: {"summary": null, "proposal": null}\n'
     "\n"
-    "All four shapes are valid. Pick the one that matches the utterance.\n\n"
+    "All shapes are valid. Pick the one that matches the utterance.\n\n"
     "---\n"
     "## DECISION RULES\n"
     "\n"
@@ -34,6 +37,8 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     "Otherwise set summary to null.\n"
     "Do NOT summarize opinions, technical content, or recaps.\n\n"
     "### When to fill proposal\n"
+    'Set proposal.type to "blocker" ONLY if the speaker explicitly states something is blocking '
+    'progress: "we\'re blocked on X", "waiting for Y", "can\'t proceed until Z", "stuck on".\n'
     'Set proposal.type to "parking_lot" ONLY if the speaker explicitly says to defer, table, or park something '
     '("let\'s park that", "separate topic", "discuss later", "take this offline") '
     "or pivots mid-sentence to a clearly unrelated subject.\n"
@@ -52,7 +57,8 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     "3. Never infer disagreement from tone. "
     'Affirmatives ("yes", "agree", "sounds good") are never conflicts.\n'
     "4. A simple topic change is NOT a parking lot. The speaker must explicitly mark the deferral.\n"
-    '5. If unsure → shape D: {"summary": null, "proposal": null}.'
+    '5. "We should fix X" is NOT a blocker — it\'s an opinion. Blockers require explicit stalled/dependency language.\n'
+    '6. If unsure → shape E: {"summary": null, "proposal": null}.'
 )
 
 REALTIME_PERSONA_PROMPTS = {
