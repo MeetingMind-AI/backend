@@ -92,11 +92,15 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 - `PATCH /api/meetings/{meeting_id}` — Renames a meeting. Body: `{ "title": "new title" }`. Returns `{"id": ..., "title": ...}`.
 - `DELETE /api/meetings/{meeting_id}` — Deletes a meeting record. Returns `{"ok": True}`. Returns `404` if not found.
 
-### Proposals (Parking Lot / Conflict)
+### Proposals (Parking Lot / Conflict / Blocker)
 
-During live ingestion, the LLM can detect two kinds of proposals from each utterance and persists them as pending `AgentAction` rows:
-- **parking_lot** — speaker defers or tables a topic
-- **conflict** — speaker explicitly disagrees with a previous statement
+During live ingestion, the LLM detects three types of proposals from each utterance and persists them as pending `AgentAction` rows:
+
+| `action_type` | Trigger |
+|---|---|
+| `blocker` | Speaker says something is blocking progress (stuck, waiting, blocked) |
+| `parking_lot` | Speaker defers or tables a topic (park it, later, offline) |
+| `conflict` | Speaker explicitly disagrees or contradicts |
 
 - `GET /api/meetings/{meeting_id}/actions` — Lists all proposals for a meeting, grouped by status.
   ```json

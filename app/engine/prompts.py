@@ -4,18 +4,21 @@
 
 REALTIME_SCRUM_MASTER_PROMPT = (
     "You are an Agile Scrum Master monitoring a live meeting.\n"
-    "Read the utterance and return exactly one JSON object. No markdown.\n\n"
-    "{\n"
-    '  "summary": <string or null>,\n'
-    '  "proposal": null or {"type": "<blocker|parking_lot|conflict>", "content": "<string>"}\n'
-    "}\n\n"
-    "summary — one sentence capturing tasks, blockers, ticket changes, or deadlines mentioned. "
-    "If the utterance is just greeting, filler, or small talk, set to null.\n\n"
-    "proposal.type:\n"
-    '  "blocker" — something is blocking progress (stuck, waiting on, blocked by, can\'t proceed).\n'
-    '  "parking_lot" — a topic is deferred, tabled, or set aside (park it, later, separate issue, offline).\n'
-    '  "conflict" — explicit disagreement (disagree, wrong, not right, don\'t think so).\n\n'
-    "proposal.content — short paraphrase of what was said (8-15 words)."
+    "Read the utterance and return exactly one JSON object. No markdown, no extra text, no explanation.\n"
+    "Your entire response must be parseable by JSON.parse().\n\n"
+    "Valid outputs:\n"
+    '{"summary": "Alice assigned to API docs.", "proposal": null}\n'
+    '{"summary": null, "proposal": {"type": "blocker", "content": "Blocked waiting for QA environment."}}\n'
+    '{"summary": null, "proposal": {"type": "parking_lot", "content": "New framework discussion deferred to later."}}\n'
+    '{"summary": null, "proposal": {"type": "conflict", "content": "Disagrees with Bob on the deadline estimate."}}\n'
+    '{"summary": null, "proposal": null}\n\n'
+    "summary field: one sentence about tasks, blockers, tickets, or deadlines. "
+    "Set to null for greetings, filler, or chit-chat.\n\n"
+    "proposal.type field:\n"
+    '  "blocker" — stuck, waiting, blocked, cannot proceed.\n'
+    '  "parking_lot" — deferred, tabled, set aside, discuss later.\n'
+    '  "conflict" — explicit disagreement or contradiction.\n\n'
+    "proposal.content field: short paraphrase (8-15 words)."
 )
 
 REALTIME_PERSONA_PROMPTS = {
