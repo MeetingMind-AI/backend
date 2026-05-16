@@ -26,21 +26,6 @@ from app.engine.vexa_client import (
 
 app = FastAPI(title="MeetingMind AI Backend")
 
-
-@app.on_event("startup")
-def _run_migrations():
-    with SessionLocal() as db:
-        try:
-            db.execute(
-                text(
-                    "ALTER TABLE agent_actions ADD COLUMN IF NOT EXISTS scheduled_date VARCHAR(30)"
-                )
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-
-
 app.include_router(websocket_router)
 
 
@@ -537,7 +522,6 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
                 "action_type": t,
                 "content": a.content,
                 "status": a.status,
-                "scheduled_date": a.scheduled_date,
             }
             if a.status == "accepted":
                 grouped[t]["accepted"].append(entry)
@@ -551,7 +535,6 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
 class ActionReviewRequest(BaseModel):
     status: str | None = Field(default=None, pattern="^(accepted|rejected|pending)$")
     content: str | None = None
-    scheduled_date: str | None = None
 
 
 @app.patch("/api/meetings/{meeting_id}/actions/{action_id}")
@@ -569,8 +552,6 @@ def review_action(
             action.status = request.status
         if request.content is not None:
             action.content = request.content
-        if request.scheduled_date is not None:
-            action.scheduled_date = request.scheduled_date
         try:
             db.commit()
             db.refresh(action)
@@ -581,13 +562,11 @@ def review_action(
             ) from exc
         status = action.status
         content = action.content
-        scheduled_date = action.scheduled_date
     return {
         "ok": True,
         "id": action_id,
         "status": status,
         "content": content,
-        "scheduled_date": scheduled_date,
     }
 
 
