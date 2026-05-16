@@ -26,6 +26,21 @@ from app.engine.vexa_client import (
 
 app = FastAPI(title="MeetingMind AI Backend")
 
+
+@app.on_event("startup")
+def _run_migrations():
+    with SessionLocal() as db:
+        try:
+            db.execute(
+                text(
+                    "ALTER TABLE agent_actions ADD COLUMN IF NOT EXISTS scheduled_date VARCHAR(30)"
+                )
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+
+
 app.include_router(websocket_router)
 
 
@@ -457,7 +472,7 @@ def list_all_actions() -> dict[str, Any]:
         rows = db.execute(
             select(AgentAction, Meeting.title, Meeting.created_at)
             .join(Meeting, AgentAction.meeting_id == Meeting.id)
-            .order_by(AgentAction.id.asc())
+            .order_by(AgentAction.id.desc())
         ).all()
 
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
@@ -497,7 +512,7 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
             db.execute(
                 select(AgentAction)
                 .where(AgentAction.meeting_id == meeting_id)
-                .order_by(AgentAction.id.asc())
+                .order_by(AgentAction.id.desc())
             )
             .scalars()
             .all()
@@ -509,27 +524,34 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
             "to_schedule": {"pending": [], "accepted": [], "rejected": []},
         }
         for a in rows:
-            if a.action_type not in grouped:
+            t = (
+                a.action_type
+                if a.action_type not in ("blocker", "conflict")
+                else "parking_lot"
+            )
+            if t not in grouped:
                 continue
             entry = {
                 "id": a.id,
                 "agent_role": a.agent_role,
-                "action_type": a.action_type,
+                "action_type": t,
                 "content": a.content,
                 "status": a.status,
+                "scheduled_date": a.scheduled_date,
             }
             if a.status == "accepted":
-                grouped[a.action_type]["accepted"].append(entry)
+                grouped[t]["accepted"].append(entry)
             elif a.status == "rejected":
-                grouped[a.action_type]["rejected"].append(entry)
+                grouped[t]["rejected"].append(entry)
             else:
-                grouped[a.action_type]["pending"].append(entry)
+                grouped[t]["pending"].append(entry)
         return grouped
 
 
 class ActionReviewRequest(BaseModel):
-    status: str = Field(pattern="^(accepted|rejected|pending)$")
+    status: str | None = Field(default=None, pattern="^(accepted|rejected|pending)$")
     content: str | None = None
+    scheduled_date: str | None = None
 
 
 @app.patch("/api/meetings/{meeting_id}/actions/{action_id}")
@@ -547,6 +569,8 @@ def review_action(
             action.status = request.status
         if request.content is not None:
             action.content = request.content
+        if request.scheduled_date is not None:
+            action.scheduled_date = request.scheduled_date
         try:
             db.commit()
             db.refresh(action)
@@ -557,11 +581,13 @@ def review_action(
             ) from exc
         status = action.status
         content = action.content
+        scheduled_date = action.scheduled_date
     return {
         "ok": True,
         "id": action_id,
         "status": status,
         "content": content,
+        "scheduled_date": scheduled_date,
     }
 
 

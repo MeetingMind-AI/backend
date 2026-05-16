@@ -73,5 +73,6 @@ class AgentAction(Base):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'pending'")
     )
+    scheduled_date: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     meeting: Mapped[Meeting] = relationship(back_populates="agent_actions")
