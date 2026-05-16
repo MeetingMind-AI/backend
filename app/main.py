@@ -460,8 +460,14 @@ def list_all_actions() -> dict[str, Any]:
             .order_by(AgentAction.id.asc())
         ).all()
 
-        grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
+            "parking_lot": {"pending": [], "accepted": [], "rejected": []},
+            "to_do": {"pending": [], "accepted": [], "rejected": []},
+            "to_schedule": {"pending": [], "accepted": [], "rejected": []},
+        }
         for a, m_title, m_created in rows:
+            if a.action_type not in grouped:
+                continue
             entry = {
                 "id": a.id,
                 "meeting_id": a.meeting_id,
@@ -472,15 +478,12 @@ def list_all_actions() -> dict[str, Any]:
                 "content": a.content,
                 "status": a.status,
             }
-            t = a.action_type
-            if t not in grouped:
-                grouped[t] = {"pending": [], "accepted": [], "rejected": []}
             if a.status == "accepted":
-                grouped[t]["accepted"].append(entry)
+                grouped[a.action_type]["accepted"].append(entry)
             elif a.status == "rejected":
-                grouped[t]["rejected"].append(entry)
+                grouped[a.action_type]["rejected"].append(entry)
             else:
-                grouped[t]["pending"].append(entry)
+                grouped[a.action_type]["pending"].append(entry)
         return grouped
 
 
@@ -500,24 +503,27 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
             .all()
         )
 
-        grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
+            "parking_lot": {"pending": [], "accepted": [], "rejected": []},
+            "to_do": {"pending": [], "accepted": [], "rejected": []},
+            "to_schedule": {"pending": [], "accepted": [], "rejected": []},
+        }
         for a in rows:
-            t = a.action_type
+            if a.action_type not in grouped:
+                continue
             entry = {
                 "id": a.id,
                 "agent_role": a.agent_role,
-                "action_type": t,
+                "action_type": a.action_type,
                 "content": a.content,
                 "status": a.status,
             }
-            if t not in grouped:
-                grouped[t] = {"pending": [], "accepted": [], "rejected": []}
             if a.status == "accepted":
-                grouped[t]["accepted"].append(entry)
+                grouped[a.action_type]["accepted"].append(entry)
             elif a.status == "rejected":
-                grouped[t]["rejected"].append(entry)
+                grouped[a.action_type]["rejected"].append(entry)
             else:
-                grouped[t]["pending"].append(entry)
+                grouped[a.action_type]["pending"].append(entry)
         return grouped
 
 
