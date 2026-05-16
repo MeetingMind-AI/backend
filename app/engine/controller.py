@@ -309,8 +309,9 @@ class ControllerAgent:
                 proposal = result.get("proposal")
                 if proposal is not None and proposal.get("type") not in (
                     "parking_lot",
-                    "conflict",
+                    "task",
                     "blocker",
+                    "to_schedule",
                 ):
                     proposal = None
                 return role, {"text": summary, "proposal": proposal}

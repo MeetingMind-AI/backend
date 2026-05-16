@@ -94,13 +94,14 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 
 ### Proposals (Parking Lot / Conflict / Blocker)
 
-During live ingestion, the LLM detects three types of proposals from each utterance and persists them as pending `AgentAction` rows:
+During live ingestion, the LLM detects four types of proposals from each utterance and persists them as pending `AgentAction` rows:
 
 | `action_type` | Trigger |
-|---|---|
+
 | `blocker` | Speaker says something is blocking progress (stuck, waiting, blocked) |
 | `parking_lot` | Speaker defers or tables a topic (park it, later, offline) |
-| `conflict` | Speaker explicitly disagrees or contradicts |
+| `task` | A concrete action item assigned to someone |
+| `to_schedule` | A follow-up meeting, discussion, or sync that needs to be scheduled |
 
 - `GET /api/meetings/{meeting_id}/actions` — Lists all proposals for a meeting, grouped by status.
   ```json
@@ -110,15 +111,22 @@ During live ingestion, the LLM detects three types of proposals from each uttera
         "id": 1,
         "agent_role": "scrum_master",
         "action_type": "parking_lot",
-        "content": "Framework decision deferred to separate discussion.",
+        "content": "New framework discussion deferred to later.",
         "status": "pending"
+      },
+      {
+        "id": 2,
+        "agent_role": "scrum_master",
+        "action_type": "task",
+        "content": "Alice to update the API documentation.",
+        "status": "accepted"
       }
     ],
     "accepted": [
       {
         "id": 2,
         "agent_role": "scrum_master",
-        "action_type": "conflict",
+        "action_type": "blocker",
         "content": "Disagrees with Bob on OAuth approach.",
         "status": "accepted"
       }
@@ -128,7 +136,7 @@ During live ingestion, the LLM detects three types of proposals from each uttera
   ```
   `pending` are un-reviewed proposals. `accepted` have been approved. `rejected` have been dismissed.
 
-- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Review a proposal.
+- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Accept or reject a proposal.
   - Body `{ "status": "accepted" }` — marks the action as accepted. Returns `{"ok": true, "id": 1, "status": "accepted"}`.
   - Body `{ "status": "rejected" }` — marks the action as rejected. Returns `{"ok": true, "id": 1, "status": "rejected"}`.
 
@@ -160,10 +168,8 @@ During live ingestion, the LLM detects three types of proposals from each uttera
     "chunk_id": 42,
     "summary": "Alice assigned to API documentation.",
     "proposal": {
-      "id": 1,
-      "type": "parking_lot",
-      "content": "Framework decision deferred to separate discussion.",
-      "status": "pending"
+      "type": "task",
+      "content": "Alice to update the API documentation."
     }
   }
   ```

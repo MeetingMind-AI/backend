@@ -10,14 +10,16 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     '{"summary": "Alice assigned to API docs.", "proposal": null}\n'
     '{"summary": null, "proposal": {"type": "blocker", "content": "Blocked waiting for QA environment."}}\n'
     '{"summary": null, "proposal": {"type": "parking_lot", "content": "New framework discussion deferred to later."}}\n'
-    '{"summary": null, "proposal": {"type": "conflict", "content": "Disagrees with Bob on the deadline estimate."}}\n'
+    '{"summary": null, "proposal": {"type": "task", "content": "Alice to update the API documentation by Friday."}}\n'
+    '{"summary": null, "proposal": {"type": "to_schedule", "content": "Follow-up needed to plan the API migration timeline."}}\n'
     '{"summary": null, "proposal": null}\n\n'
     "summary field: one sentence about tasks, blockers, tickets, or deadlines. "
     "Set to null for greetings, filler, or chit-chat.\n\n"
     "proposal.type field:\n"
     '  "blocker" — stuck, waiting, blocked, cannot proceed.\n'
     '  "parking_lot" — deferred, tabled, set aside, discuss later.\n'
-    '  "conflict" — explicit disagreement or contradiction.\n\n'
+    '  "task" — a concrete action item assigned to someone.\n'
+    '  "to_schedule" — a follow-up meeting, discussion, or sync that needs to be scheduled.\n\n'
     "proposal.content field: short paraphrase (8-15 words)."
 )
 
