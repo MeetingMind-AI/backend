@@ -549,16 +549,19 @@ def review_action(
             action.content = request.content
         try:
             db.commit()
+            db.refresh(action)
         except SQLAlchemyError as exc:
             db.rollback()
             raise HTTPException(
                 status_code=500, detail=f"Failed to update action: {exc}"
             ) from exc
+        status = action.status
+        content = action.content
     return {
         "ok": True,
         "id": action_id,
-        "status": action.status,
-        "content": action.content,
+        "status": status,
+        "content": content,
     }
 
 
