@@ -144,9 +144,12 @@ During live ingestion, the LLM detects three types of proposals from each uttera
   }
   ```
 
-- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Accept or reject a proposal.
+- `GET /api/actions` — Lists ALL proposals across all meetings, grouped by type then status (same shape as above but with `meeting_id`, `meeting_title`, `meeting_date` included in each entry).
+
+- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Accept, reject, or reset a proposal.
   - Body `{ "status": "accepted" }` — marks the action as accepted. Returns `{"ok": true, "id": 1, "status": "accepted"}`.
   - Body `{ "status": "rejected" }` — marks the action as rejected. Returns `{"ok": true, "id": 1, "status": "rejected"}`.
+  - Body `{ "status": "pending" }` — resets the action to pending (undo). Returns `{"ok": true, "id": 1, "status": "pending"}`.
 
 ### Transcripts
 

@@ -451,6 +451,38 @@ def get_transcript(meeting_id: int) -> dict[str, Any]:
         }
 
 
+@app.get("/api/actions")
+def list_all_actions() -> dict[str, Any]:
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(AgentAction, Meeting.title, Meeting.created_at)
+            .join(Meeting, AgentAction.meeting_id == Meeting.id)
+            .order_by(AgentAction.id.asc())
+        ).all()
+        grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for a, m_title, m_created in rows:
+            entry = {
+                "id": a.id,
+                "meeting_id": a.meeting_id,
+                "meeting_title": m_title,
+                "meeting_date": m_created.isoformat() if m_created else None,
+                "agent_role": a.agent_role,
+                "action_type": a.action_type,
+                "content": a.content,
+                "status": a.status,
+            }
+            t = a.action_type
+            if t not in grouped:
+                grouped[t] = {"pending": [], "accepted": [], "rejected": []}
+            if a.status == "accepted":
+                grouped[t]["accepted"].append(entry)
+            elif a.status == "rejected":
+                grouped[t]["rejected"].append(entry)
+            else:
+                grouped[t]["pending"].append(entry)
+        return grouped
+
+
 @app.get("/api/meetings/{meeting_id}/actions")
 def list_actions(meeting_id: int) -> dict[str, Any]:
     with SessionLocal() as db:
@@ -488,7 +520,7 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
 
 
 class ActionReviewRequest(BaseModel):
-    status: str = Field(pattern="^(accepted|rejected)$")
+    status: str = Field(pattern="^(accepted|rejected|pending)$")
 
 
 @app.patch("/api/meetings/{meeting_id}/actions/{action_id}")
@@ -502,17 +534,7 @@ def review_action(
         action = db.get(AgentAction, action_id)
         if not action or action.meeting_id != meeting_id:
             raise HTTPException(status_code=404, detail="Action not found")
-        if request.status == "rejected":
-            action.status = "rejected"
-            try:
-                db.commit()
-            except SQLAlchemyError as exc:
-                db.rollback()
-                raise HTTPException(
-                    status_code=500, detail=f"Failed to reject action: {exc}"
-                ) from exc
-            return {"ok": True, "id": action_id, "status": "rejected"}
-        action.status = "accepted"
+        action.status = request.status
         try:
             db.commit()
         except SQLAlchemyError as exc:
@@ -520,7 +542,7 @@ def review_action(
             raise HTTPException(
                 status_code=500, detail=f"Failed to update action: {exc}"
             ) from exc
-    return {"ok": True, "id": action_id, "status": "accepted"}
+    return {"ok": True, "id": action_id, "status": request.status}
 
 
 @app.get("/health", tags=["health"])
