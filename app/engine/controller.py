@@ -307,12 +307,6 @@ class ControllerAgent:
                 result = json.loads(raw)
                 summary = result.get("summary", "IGNORE")
                 proposal = result.get("proposal")
-                if proposal is not None and proposal.get("type") not in (
-                    "parking_lot",
-                    "task",
-                    "to_schedule",
-                ):
-                    proposal = None
                 return role, {"text": summary, "proposal": proposal}
             except Exception as exc:
                 print(f"[ControllerAgent] Persona {role} failed: {exc}")

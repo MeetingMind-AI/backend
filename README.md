@@ -92,14 +92,14 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 - `PATCH /api/meetings/{meeting_id}` — Renames a meeting. Body: `{ "title": "new title" }`. Returns `{"id": ..., "title": ...}`.
 - `DELETE /api/meetings/{meeting_id}` — Deletes a meeting record. Returns `{"ok": True}`. Returns `404` if not found.
 
-### Proposals (Parking Lot / Task / To Schedule)
+### Proposals (Parking Lot / To Do / To Schedule)
 
 During live ingestion, the LLM detects three types of proposals from each utterance and persists them as pending `AgentAction` rows:
 
 | `action_type` | Trigger |
 
 | `parking_lot` | Speaker is blocked, defers, or tables a topic (stuck, park it, later, offline) |
-| `task` | A concrete action item assigned to someone |
+| `to_do` | A concrete action item assigned to someone |
 | `to_schedule` | A follow-up meeting, discussion, or sync that needs to be scheduled |
 
 - `GET /api/meetings/{meeting_id}/actions` — Lists all proposals for a meeting, grouped by type, then by status.
@@ -124,7 +124,7 @@ During live ingestion, the LLM detects three types of proposals from each uttera
       ],
       "rejected": []
     },
-    "task": {
+    "to_do": {
       "pending": [
         {
           "id": 3,
@@ -146,10 +146,11 @@ During live ingestion, the LLM detects three types of proposals from each uttera
 
 - `GET /api/actions` — Lists ALL proposals across all meetings, grouped by type then status (same shape as above but with `meeting_id`, `meeting_title`, `meeting_date` included in each entry).
 
-- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Accept, reject, or reset a proposal.
-  - Body `{ "status": "accepted" }` — marks the action as accepted. Returns `{"ok": true, "id": 1, "status": "accepted"}`.
-  - Body `{ "status": "rejected" }` — marks the action as rejected. Returns `{"ok": true, "id": 1, "status": "rejected"}`.
-  - Body `{ "status": "pending" }` — resets the action to pending (undo). Returns `{"ok": true, "id": 1, "status": "pending"}`.
+- `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Accept, reject, reset, or edit a proposal.
+  - Body `{ "status": "accepted" }` — marks the action as accepted. Returns `{"ok": true, "id": 1, "status": "accepted", "content": "..."}`.
+  - Body `{ "status": "rejected" }` — marks the action as rejected. Returns `{"ok": true, "id": 1, "status": "rejected", "content": "..."}`.
+  - Body `{ "status": "pending" }` — resets the action to pending (undo). Returns `{"ok": true, "id": 1, "status": "pending", "content": "..."}`.
+  - Body `{ "content": "new text" }` — updates the action text (leaves status unchanged). Returns `{"ok": true, "id": 1, "status": "...", "content": "new text"}`.
 
 ### Transcripts
 
@@ -179,7 +180,7 @@ During live ingestion, the LLM detects three types of proposals from each uttera
     "chunk_id": 42,
     "summary": "Alice assigned to API documentation.",
     "proposal": {
-      "type": "task",
+      "type": "to_do",
       "content": "Alice to update the API documentation."
     }
   }

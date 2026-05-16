@@ -459,6 +459,7 @@ def list_all_actions() -> dict[str, Any]:
             .join(Meeting, AgentAction.meeting_id == Meeting.id)
             .order_by(AgentAction.id.asc())
         ).all()
+
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
         for a, m_title, m_created in rows:
             entry = {
@@ -498,16 +499,17 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
             .scalars()
             .all()
         )
+
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
         for a in rows:
+            t = a.action_type
             entry = {
                 "id": a.id,
                 "agent_role": a.agent_role,
-                "action_type": a.action_type,
+                "action_type": t,
                 "content": a.content,
                 "status": a.status,
             }
-            t = a.action_type
             if t not in grouped:
                 grouped[t] = {"pending": [], "accepted": [], "rejected": []}
             if a.status == "accepted":
@@ -521,6 +523,7 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
 
 class ActionReviewRequest(BaseModel):
     status: str = Field(pattern="^(accepted|rejected|pending)$")
+    content: str | None = None
 
 
 @app.patch("/api/meetings/{meeting_id}/actions/{action_id}")
@@ -534,7 +537,10 @@ def review_action(
         action = db.get(AgentAction, action_id)
         if not action or action.meeting_id != meeting_id:
             raise HTTPException(status_code=404, detail="Action not found")
-        action.status = request.status
+        if request.status is not None:
+            action.status = request.status
+        if request.content is not None:
+            action.content = request.content
         try:
             db.commit()
         except SQLAlchemyError as exc:
@@ -542,7 +548,12 @@ def review_action(
             raise HTTPException(
                 status_code=500, detail=f"Failed to update action: {exc}"
             ) from exc
-    return {"ok": True, "id": action_id, "status": request.status}
+    return {
+        "ok": True,
+        "id": action_id,
+        "status": action.status,
+        "content": action.content,
+    }
 
 
 @app.get("/health", tags=["health"])
