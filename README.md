@@ -92,49 +92,57 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 - `PATCH /api/meetings/{meeting_id}` — Renames a meeting. Body: `{ "title": "new title" }`. Returns `{"id": ..., "title": ...}`.
 - `DELETE /api/meetings/{meeting_id}` — Deletes a meeting record. Returns `{"ok": True}`. Returns `404` if not found.
 
-### Proposals (Parking Lot / Conflict / Blocker)
+### Proposals (Parking Lot / Task / To Schedule)
 
-During live ingestion, the LLM detects four types of proposals from each utterance and persists them as pending `AgentAction` rows:
+During live ingestion, the LLM detects three types of proposals from each utterance and persists them as pending `AgentAction` rows:
 
 | `action_type` | Trigger |
 
-| `blocker` | Speaker says something is blocking progress (stuck, waiting, blocked) |
-| `parking_lot` | Speaker defers or tables a topic (park it, later, offline) |
+| `parking_lot` | Speaker is blocked, defers, or tables a topic (stuck, park it, later, offline) |
 | `task` | A concrete action item assigned to someone |
 | `to_schedule` | A follow-up meeting, discussion, or sync that needs to be scheduled |
 
-- `GET /api/meetings/{meeting_id}/actions` — Lists all proposals for a meeting, grouped by status.
+- `GET /api/meetings/{meeting_id}/actions` — Lists all proposals for a meeting, grouped by type, then by status.
   ```json
   {
-    "pending": [
-      {
-        "id": 1,
-        "agent_role": "scrum_master",
-        "action_type": "parking_lot",
-        "content": "New framework discussion deferred to later.",
-        "status": "pending"
-      },
-      {
-        "id": 2,
-        "agent_role": "scrum_master",
-        "action_type": "task",
-        "content": "Alice to update the API documentation.",
-        "status": "accepted"
-      }
-    ],
-    "accepted": [
-      {
-        "id": 2,
-        "agent_role": "scrum_master",
-        "action_type": "blocker",
-        "content": "Disagrees with Bob on OAuth approach.",
-        "status": "accepted"
-      }
-    ],
-    "rejected": []
+    "parking_lot": {
+      "pending": [
+        {
+          "id": 1,
+          "agent_role": "scrum_master",
+          "content": "New framework discussion deferred to later.",
+          "status": "pending"
+        }
+      ],
+      "accepted": [
+        {
+          "id": 2,
+          "agent_role": "scrum_master",
+          "content": "Disagrees with Bob on OAuth approach.",
+          "status": "accepted"
+        }
+      ],
+      "rejected": []
+    },
+    "task": {
+      "pending": [
+        {
+          "id": 3,
+          "agent_role": "scrum_master",
+          "content": "Alice to update the API documentation.",
+          "status": "pending"
+        }
+      ],
+      "accepted": [],
+      "rejected": []
+    },
+    "to_schedule": {
+      "pending": [],
+      "accepted": [],
+      "rejected": []
+    }
   }
   ```
-  `pending` are un-reviewed proposals. `accepted` have been approved. `rejected` have been dismissed.
 
 - `PATCH /api/meetings/{meeting_id}/actions/{action_id}` — Accept or reject a proposal.
   - Body `{ "status": "accepted" }` — marks the action as accepted. Returns `{"ok": true, "id": 1, "status": "accepted"}`.

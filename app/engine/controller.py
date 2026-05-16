@@ -310,7 +310,6 @@ class ControllerAgent:
                 if proposal is not None and proposal.get("type") not in (
                     "parking_lot",
                     "task",
-                    "blocker",
                     "to_schedule",
                 ):
                     proposal = None

@@ -466,9 +466,7 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
             .scalars()
             .all()
         )
-        pending: list[dict[str, Any]] = []
-        accepted: list[dict[str, Any]] = []
-        rejected: list[dict[str, Any]] = []
+        grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
         for a in rows:
             entry = {
                 "id": a.id,
@@ -477,13 +475,16 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
                 "content": a.content,
                 "status": a.status,
             }
+            t = a.action_type
+            if t not in grouped:
+                grouped[t] = {"pending": [], "accepted": [], "rejected": []}
             if a.status == "accepted":
-                accepted.append(entry)
+                grouped[t]["accepted"].append(entry)
             elif a.status == "rejected":
-                rejected.append(entry)
+                grouped[t]["rejected"].append(entry)
             else:
-                pending.append(entry)
-        return {"pending": pending, "accepted": accepted, "rejected": rejected}
+                grouped[t]["pending"].append(entry)
+        return grouped
 
 
 class ActionReviewRequest(BaseModel):
