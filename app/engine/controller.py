@@ -6,6 +6,7 @@ import json
 import os
 
 import httpx
+from mem0 import Memory
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,6 +30,13 @@ DISCUSSION_ROLES = ("tech_lead", "product_manager")
 # ---------------------------------------------------------------------------
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -37,6 +45,47 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _init_memory() -> Memory | None:
+    if not _env_bool("MEM0_ENABLED", True):
+        return None
+
+    ollama_url = os.getenv("MEM0_OLLAMA_URL", "http://ollama:11434").strip()
+    llm_model = os.getenv("MEM0_LLM_MODEL", "llama3.1").strip() or "llama3.1"
+    embed_model = (
+        os.getenv("MEM0_EMBED_MODEL", "nomic-embed-text").strip()
+        or "nomic-embed-text"
+    )
+
+    config = {
+        "llm": {
+            "provider": "ollama",
+            "config": {
+                "model": llm_model,
+                "ollama_base_url": ollama_url,
+                "temperature": 0.1,
+            },
+        },
+        "embedder": {
+            "provider": "ollama",
+            "config": {
+                "model": embed_model,
+                "ollama_base_url": ollama_url,
+            },
+        },
+    }
+
+    try:
+        return Memory.from_config(config)
+    except Exception as exc:
+        print(f"[Memory Error] Failed to initialize Mem0: {exc}")
+        return None
+
+
+memory = _init_memory()
+MEM0_SAVE_ENABLED = _env_bool("MEM0_SAVE_ENABLED", True)
+MEM0_SEARCH_ENABLED = _env_bool("MEM0_SEARCH_ENABLED", True)
 
 
 class OllamaClient:
@@ -367,13 +416,27 @@ class ControllerAgent:
 
         # 1. Load transcript
         transcript = TranscriptLoader.load(meeting_id, db_session)
+
+        # Retrieve past context from the memory layer based on the current transcript
+        query_text = transcript[:1000] if transcript else "General agile meeting"
+        past_memories = ""
+        if memory is not None and MEM0_SEARCH_ENABLED:
+            try:
+                past_memories = memory.search(query=query_text, user_id="team_agile")
+            except Exception as exc:
+                print(f"[Memory Error] Failed to search memories: {exc}")
+
         if not transcript:
             msg = "## Summary\nNo transcript content available."
             print(f"[Final Report] meeting={meeting_id}\n{msg}\n")
             return msg
 
         # 2. Initial analysis: Tech Lead + Product Manager (parallel)
-        base_prompt = f"Meeting ID: {meeting_id}\n\nTranscript:\n{transcript}"
+        base_prompt = (
+            f"Meeting ID: {meeting_id}\n\n"
+            f"--- RELEVANT PAST MEMORIES & CONTEXT ---\n{past_memories}\n\n"
+            f"--- CURRENT TRANSCRIPT ---\n{transcript}"
+        )
         initial_reports = await self._run_initial_analyses(base_prompt)
 
         # 3. Discussion rounds (Tech Lead ↔ PM)
@@ -411,6 +474,24 @@ class ControllerAgent:
             f"Product Manager: {report['product_manager']}\n"
             f"Scrum Master: {report['scrum_master']}\n"
         )
+
+        # Save today's findings into long-term memory
+        if memory is not None and MEM0_SAVE_ENABLED:
+            try:
+                memory.add(
+                    f"Tech Lead findings: {report.get('tech_lead', '')}",
+                    user_id="team_agile",
+                )
+                memory.add(
+                    f"Product Manager findings: {report.get('product_manager', '')}",
+                    user_id="team_agile",
+                )
+                memory.add(
+                    f"Scrum Master synthesis: {report.get('scrum_master', '')}",
+                    user_id="team_agile",
+                )
+            except Exception as e:
+                print(f"[Memory Error] Failed to save memories to Mem0: {e}")
         return json.dumps(report)
 
     # -- private helpers ---------------------------------------------------
