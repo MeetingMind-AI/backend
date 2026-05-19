@@ -59,6 +59,13 @@ def _init_memory() -> Memory | None:
     )
 
     config = {
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "collection_name": "meetingmind",
+                "embedding_model_dims": 768,
+            }
+        },
         "llm": {
             "provider": "ollama",
             "config": {
@@ -422,7 +429,9 @@ class ControllerAgent:
         past_memories = ""
         if memory is not None and MEM0_SEARCH_ENABLED:
             try:
-                past_memories = memory.search(query=query_text, user_id="team_agile")
+                past_memories = memory.search(
+                    query=query_text, filters={"user_id": "team_agile"}
+                )
             except Exception as exc:
                 print(f"[Memory Error] Failed to search memories: {exc}")
 
