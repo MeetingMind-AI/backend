@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
 from fastapi.responses import Response as RawResponse
-from passlib.context import CryptContext
+import bcrypt
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 
@@ -16,8 +16,15 @@ from app.db.session import SessionLocal
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _MAX_PHOTO_BYTES = 500 * 1024  # 500 KB
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def _verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
 def _set_cookie(response: Response, token: str) -> None:
@@ -92,7 +99,7 @@ def signup(req: SignupRequest, response: Response) -> dict[str, Any]:
         user = User(
             email=req.email,
             name=req.name.strip(),
-            password_hash=_pwd.hash(req.password),
+            password_hash=_hash_password(req.password),
             photo=photo,
         )
         db.add(user)
@@ -113,7 +120,7 @@ def login(req: LoginRequest, response: Response) -> dict[str, Any]:
         user = db.execute(
             select(User).where(User.email == req.email)
         ).scalar_one_or_none()
-        if not user or not _pwd.verify(req.password, user.password_hash):
+        if not user or not _verify_password(req.password, user.password_hash):
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
         token = uuid.uuid4().hex
