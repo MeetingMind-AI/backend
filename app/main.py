@@ -50,6 +50,7 @@ class MeetingStartRequest(BaseModel):
     platform: str = Field(min_length=1)
     native_id: str = Field(min_length=1)
     team_id: int | None = None
+    passcode: str | None = None
 
 
 class MeetingRenameRequest(BaseModel):
@@ -131,6 +132,8 @@ async def start_meeting(
         "native_meeting_id": request.native_id,
         "transcribe_enabled": True,
     }
+    if request.passcode:
+        bot_payload["passcode"] = request.passcode
 
     vexa_api_key = os.getenv("VEXA_API_KEY", "")
     if not vexa_api_key:
