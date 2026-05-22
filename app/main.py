@@ -404,6 +404,15 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        from app.db.models import Topic
+        topic_rows = db.execute(
+            select(meeting_topics).where(meeting_topics.c.meeting_id == meeting_id)
+        ).all()
+        topics = []
+        for row in topic_rows:
+            t = db.get(Topic, row.topic_id)
+            if t:
+                topics.append({"id": t.id, "name": t.name, "color": t.color})
         return {
             "id": meeting.id,
             "title": meeting.title,
@@ -411,6 +420,7 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
             "summary": meeting.summary,
             "team_id": meeting.team_id,
             "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+            "topics": topics,
         }
 
 
