@@ -20,6 +20,92 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 
 ## Service Endpoints
 
+### Authentication
+
+All authenticated endpoints read the `mm_session` cookie set on login/signup. Endpoints that require auth return `401` if the cookie is missing or invalid.
+
+- `POST /api/auth/signup`
+  - Body: `{ "email": "...", "name": "...", "password": "...", "confirm_password": "...", "photo_b64": null }`
+  - Creates a user, opens a session, sets the `mm_session` cookie. Returns `{"user": {id, name, email, photo_url}}`.
+  - `409` if email already registered. `422` if passwords don't match or are too short. `413` if photo > 500 KB.
+
+- `POST /api/auth/login`
+  - Body: `{ "email": "...", "password": "..." }`
+  - Sets `mm_session` cookie. Returns `{"user": {id, name, email, photo_url}}`.
+  - `401` on invalid credentials.
+
+- `POST /api/auth/logout`
+  - Deletes the session record and clears the cookie. Returns `{"ok": "logged out"}`.
+
+- `GET /api/auth/me`
+  - Returns the currently authenticated user: `{id, name, email, photo_url}`. `401` if not logged in.
+
+- `GET /api/auth/photo/{user_id}`
+  - Returns the raw profile photo (JPEG). `404` if the user has no photo.
+
+### Teams
+
+All team endpoints require a valid session cookie. Members-only actions return `403` if the caller is not a member; owner-only actions return `403` if the caller is not the owner.
+
+- `GET /api/teams`
+  - Returns all teams the current user belongs to.
+  ```json
+  { "teams": [{ "id": 1, "name": "Acme", "owner_id": 2, "is_owner": true, "member_count": 4, "created_at": "..." }] }
+  ```
+
+- `POST /api/teams`
+  - Body: `{ "name": "Team name" }`
+  - Creates a team and automatically adds the creator as a member and owner. Returns the new team object.
+
+- `GET /api/teams/{team_id}`
+  - Returns full team detail including members and topics list. Requires membership.
+  ```json
+  {
+    "id": 1, "name": "Acme", "owner_id": 2, "is_owner": true,
+    "invite_token": "abc123",
+    "members": [{ "id": 2, "name": "Alice", "email": "alice@...", "is_owner": true }],
+    "topics": [{ "id": 3, "name": "Backend", "color": "#4f8ef7" }]
+  }
+  ```
+
+- `PATCH /api/teams/{team_id}`
+  - Body: `{ "name": "New name" }`. Owner only. Returns `{id, name}`.
+
+- `POST /api/teams/{team_id}/leave`
+  - Removes the current user from the team. Owners cannot leave (`400`).
+
+- `GET /api/teams/{team_id}/invite`
+  - Owner only. Returns `{ "invite_url": "...", "invite_token": "..." }`.
+
+- `POST /api/teams/join/{invite_token}`
+  - Joins the team identified by the invite token. Idempotent — safe to call if already a member. Returns `{ "team_id": 1, "team_name": "Acme" }`.
+
+- `GET /api/teams/{team_id}/members`
+  - Returns all members of the team. Requires membership.
+  ```json
+  { "members": [{ "id": 2, "name": "Alice", "email": "alice@...", "is_owner": true }] }
+  ```
+
+- `DELETE /api/teams/{team_id}/members/{target_user_id}`
+  - Owner only. Removes a member from the team. Cannot kick yourself (`400`). Returns `{"ok": true}`.
+
+### Team Topics
+
+- `GET /api/teams/{team_id}/topics`
+  - Lists all topics for a team. Requires membership.
+  ```json
+  { "topics": [{ "id": 3, "name": "Backend", "color": "#4f8ef7" }] }
+  ```
+
+- `POST /api/teams/{team_id}/topics`
+  - Body: `{ "name": "Backend", "color": "#4f8ef7" }`. Requires membership. Returns the created topic.
+
+- `PATCH /api/teams/{team_id}/topics/{topic_id}`
+  - Body: `{ "name": "...", "color": "..." }` (both optional). Requires membership. Returns the updated topic.
+
+- `DELETE /api/teams/{team_id}/topics/{topic_id}`
+  - Requires membership. Returns `{"ok": true}`.
+
 ### Health
 
 - `GET /health` — Liveness probe.
@@ -30,8 +116,10 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 ### Meeting Lifecycle
 
 - `POST /api/meetings/start`
-  - Body: `{ "platform": "<platform>", "native_id": "<meeting-id>" }`
-  - Supported `platform` values: `google_meet`, `zoom`, `teams`
+  - Body: `{ "platform": "<platform>", "native_id": "<meeting-id>", "team_id": 1, "passcode": "" }`
+  - `platform` (required): `google_meet`, `zoom`, or `teams`
+  - `team_id` (optional): associates the meeting with a team
+  - `passcode` (optional): required for passcode-protected Teams meetings
   - Deploys a Vexa bot to join the meeting. Upserts the meeting record (re-uses existing row if `vexa_meeting_id` already exists). Schedules background tasks to poll transcripts and monitor the meeting lifecycle until completion. Returns `{"meeting_id": ...}`.
 
 - `POST /api/meetings/{meeting_id}/leave`
@@ -56,7 +144,7 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
 
 ### Meeting CRUD
 
-- `GET /api/meetings` — Lists all meetings ordered by `created_at` descending.
+- `GET /api/meetings` — Lists all meetings ordered by `created_at` descending. Accepts optional `?team_id=` query param to filter by team.
   ```json
   {
     "meetings": [
@@ -69,7 +157,11 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
           "product_manager": "{...}",
           "scrum_master": "{\"summary\": \"...\", \"pending_to_schedule\": [], \"parking_lot\": [], \"to_do\": []}"
         },
-        "created_at": "2026-05-15T10:00:00+00:00"
+        "team_id": 1,
+        "created_at": "2026-05-15T10:00:00+00:00",
+        "topics": [
+          { "id": 3, "name": "Backend", "color": "#4f8ef7" }
+        ]
       }
     ]
   }
@@ -85,12 +177,25 @@ FastAPI service for meeting orchestration, transcript ingestion, and Agile-focus
       "product_manager": "{...}",
       "scrum_master": "{\"summary\": \"...\", \"pending_to_schedule\": [], \"parking_lot\": [], \"to_do\": []}"
     },
-    "created_at": "2026-05-15T10:00:00+00:00"
+    "team_id": 1,
+    "created_at": "2026-05-15T10:00:00+00:00",
+    "topics": [
+      { "id": 3, "name": "Backend", "color": "#4f8ef7" }
+    ]
   }
   ```
   Returns `404` if not found.
 - `PATCH /api/meetings/{meeting_id}` — Renames a meeting. Body: `{ "title": "new title" }`. Returns `{"id": ..., "title": ...}`.
 - `DELETE /api/meetings/{meeting_id}` — Deletes a meeting record. Returns `{"ok": True}`. Returns `404` if not found.
+
+### Meeting Topics
+
+Topics are team-scoped labels with a color. They can be assigned to meetings as tags.
+
+- `POST /api/meetings/{meeting_id}/topics/{topic_id}` — Assigns a topic to a meeting. Returns `{"ok": true}`.
+- `DELETE /api/meetings/{meeting_id}/topics/{topic_id}` — Removes a topic from a meeting. Returns `{"ok": true}`.
+
+> Topic CRUD (create / list / update / delete) is managed under the Teams API: `GET|POST|PATCH|DELETE /api/teams/{team_id}/topics`.
 
 ### Proposals (Parking Lot / To Do / To Schedule)
 
@@ -227,18 +332,94 @@ Stores high-level metadata about meetings orchestrated by Vexa.
 | `title` | `String(255)` | | The fallback or true title of the meeting. |
 | `status` | `String(64)` | `'pending'` | The meeting lifecycle status (e.g. `active`, `completed`). |
 | `summary` | `JSONB` | `NULL` | The generated final report from Ollama: dict with `tech_lead`, `product_manager`, and `scrum_master` keys. The `scrum_master` value is a JSON string with keys `summary`, `pending_to_schedule`, `parking_lot`, and `to_do`. |
+| `discussion_log` | `JSONB` | `NULL` | Reserved for storing a structured discussion log. |
+| `team_id` | `Integer` | `NULL` | FK → `teams.id` (SET NULL on delete). Associates the meeting with a team. |
+| `created_by` | `Integer` | `NULL` | FK → `users.id` (SET NULL on delete). The user who dispatched the bot. |
 | `created_at` | `DateTime` | `now()` | Local timestamp of when the meeting record was created. |
 
-#### 2. `transcript_chunks` Table
+#### 2. `users` Table
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | |
+| `name` | `String(120)` | | Display name. |
+| `email` | `String(150)` | Unique, Indexed | Login email. |
+| `password_hash` | `String(128)` | | bcrypt hash. |
+| `photo` | `LargeBinary` | `NULL` | Raw JPEG profile photo (max 500 KB). |
+| `created_at` | `DateTime` | `now()` | |
+
+#### 3. `sessions` Table
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | |
+| `user_id` | `Integer` | Indexed | FK → `users.id` (CASCADE delete). |
+| `token` | `String(64)` | Unique, Indexed | The `mm_session` cookie value. |
+| `created_at` | `DateTime` | `now()` | |
+
+#### 4. `teams` Table
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | |
+| `name` | `String(120)` | | Team display name. |
+| `owner_id` | `Integer` | `NULL` | FK → `users.id` (SET NULL on delete). |
+| `invite_token` | `String(64)` | Unique, Indexed | Token used in invite links. |
+| `created_at` | `DateTime` | `now()` | |
+
+#### 5. `team_memberships` Table
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | |
+| `user_id` | `Integer` | Indexed | FK → `users.id` (CASCADE delete). |
+| `team_id` | `Integer` | Indexed | FK → `teams.id` (CASCADE delete). |
+| `joined_at` | `DateTime` | `now()` | |
+
+Unique constraint on `(user_id, team_id)`.
+
+#### 6. `transcript_chunks` Table
 Stores raw transcription snippets returned by Vexa WebSocket events and synced logs.
 
 | Column | Type | Default | Description |
 |--------|------|---------|-------------|
 | `id` | `Integer` | Primary Key | Unique ID for each speech chunk. |
-| `meeting_id` | `Integer` | Indexed | Foreign Key linking back to `meetings(id)`. |
+| `meeting_id` | `Integer` | Indexed | FK → `meetings.id` (CASCADE delete). |
 | `speaker` | `String(120)` | | Name of the person speaking. |
 | `text` | `Text` | | The transcribed speech. |
 | `timestamp` | `DateTime` | | The absolute start time of the speech chunk. |
+
+#### 7. `agent_actions` Table
+Stores AI-detected proposals (to-dos, parking lot items, items to schedule) extracted during live transcript ingestion.
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | |
+| `meeting_id` | `Integer` | Indexed | FK → `meetings.id` (CASCADE delete). |
+| `agent_role` | `String(120)` | | The AI persona that raised the action (e.g. `scrum_master`). |
+| `action_type` | `String(120)` | | `to_do`, `parking_lot`, or `to_schedule`. |
+| `content` | `Text` | | The action text. |
+| `status` | `String(20)` | `'pending'` | `pending`, `accepted`, or `rejected`. |
+
+#### 8. `topics` Table
+Team-scoped labels that can be assigned to meetings as tags.
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | |
+| `team_id` | `Integer` | Indexed | FK → `teams.id` (CASCADE delete). |
+| `name` | `String(80)` | | Display name of the topic. |
+| `color` | `String(7)` | `'#4f8ef7'` | Hex color used to render the tag in the UI. |
+| `created_at` | `DateTime` | `now()` | |
+
+#### 9. `meeting_topics` Table
+Many-to-many association between meetings and topics.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `meeting_id` | `Integer` | FK → `meetings.id` (CASCADE delete). Part of composite PK. |
+| `topic_id` | `Integer` | FK → `topics.id` (CASCADE delete). Part of composite PK. |
+
 ## Running with Docker Compose
 
 To quickly start the application and its dependencies (like PostgreSQL and Redis), you can use Docker Compose.
