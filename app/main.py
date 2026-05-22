@@ -3,18 +3,23 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.api.auth import router as auth_router
+from app.api.deps import get_current_user_id
+from app.api.teams import router as teams_router
 from app.api.websockets import router as websocket_router
 from app.api.ws_manager import manager
-from app.db.models import AgentAction, Meeting, TranscriptChunk
-from app.db.session import SessionLocal
+from app.db.base import Base
+from app.db.models import AgentAction, Meeting, Session, TranscriptChunk, meeting_topics
+from app.db.session import SessionLocal, engine
 from app.engine.controller import ControllerAgent
 from app.engine.vexa_client import (
     TERMINAL_MEETING_STATUSES,
@@ -24,14 +29,27 @@ from app.engine.vexa_client import (
     update_meeting_status,
 )
 
-app = FastAPI(title="MeetingMind AI Backend")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(title="MeetingMind AI Backend", lifespan=lifespan)
+
+app.include_router(auth_router)
+app.include_router(teams_router)
 app.include_router(websocket_router)
+
+
+# ── request models ────────────────────────────────────────────────────────────
 
 
 class MeetingStartRequest(BaseModel):
     platform: str = Field(min_length=1)
     native_id: str = Field(min_length=1)
+    team_id: int | None = None
     passcode: str | None = None
 
 
@@ -44,31 +62,34 @@ class ClarityRequest(BaseModel):
     last_x_minutes: int | None = Field(default=None, ge=1)
 
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+
 def _find_local_meeting_id(
     vexa_meeting_id: str | None, platform: str, native_id: str
 ) -> int | None:
     with SessionLocal() as db:
         if vexa_meeting_id:
-            by_vexa_stmt = (
+            by_vexa = (
                 select(Meeting.id)
                 .where(Meeting.vexa_meeting_id == vexa_meeting_id)
                 .limit(1)
             )
-            by_vexa_result = db.execute(by_vexa_stmt).scalar_one_or_none()
-            if by_vexa_result is not None:
-                return int(by_vexa_result)
+            result = db.execute(by_vexa).scalar_one_or_none()
+            if result is not None:
+                return int(result)
 
         if platform and native_id:
             fallback_title = f"{platform}:{native_id}"
-            by_title_stmt = (
+            by_title = (
                 select(Meeting.id)
                 .where(Meeting.title == fallback_title)
                 .order_by(Meeting.created_at.desc())
                 .limit(1)
             )
-            by_title_result = db.execute(by_title_stmt).scalar_one_or_none()
-            if by_title_result is not None:
-                return int(by_title_result)
+            result = db.execute(by_title).scalar_one_or_none()
+            if result is not None:
+                return int(result)
 
     return None
 
@@ -78,19 +99,34 @@ def _get_local_meeting_context(local_meeting_id: int) -> tuple[str, str]:
         meeting = db.get(Meeting, local_meeting_id)
         if meeting is None:
             return "", ""
-
         title = str(meeting.title or "")
         if ":" not in title:
             return "", ""
-
         platform, native_id = title.split(":", 1)
         return platform.strip(), native_id.strip()
 
 
+def _user_id_from_cookie(mm_session: str | None) -> int | None:
+    if not mm_session:
+        return None
+    with SessionLocal() as db:
+        row = db.execute(
+            select(Session).where(Session.token == mm_session)
+        ).scalar_one_or_none()
+        return int(row.user_id) if row else None
+
+
+# ── meeting endpoints ─────────────────────────────────────────────────────────
+
+
 @app.post("/api/meetings/start")
 async def start_meeting(
-    request: MeetingStartRequest, background_tasks: BackgroundTasks
+    request: MeetingStartRequest,
+    background_tasks: BackgroundTasks,
+    mm_session: str | None = Cookie(default=None),
 ) -> dict[str, int]:
+    user_id = _user_id_from_cookie(mm_session)
+
     bot_payload = {
         "platform": request.platform,
         "native_meeting_id": request.native_id,
@@ -103,10 +139,7 @@ async def start_meeting(
     if not vexa_api_key:
         raise HTTPException(status_code=500, detail="VEXA_API_KEY is not configured")
 
-    headers = {
-        "X-API-Key": vexa_api_key,
-        "Content-Type": "application/json",
-    }
+    headers = {"X-API-Key": vexa_api_key, "Content-Type": "application/json"}
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -116,14 +149,12 @@ async def start_meeting(
                 headers=headers,
             )
         bot_response.raise_for_status()
-        raw_bot_data: Any = bot_response.json() if bot_response.content else {}
-        deployed_bot_data: dict[str, Any] = (
-            raw_bot_data if isinstance(raw_bot_data, dict) else {}
-        )
+        raw: Any = bot_response.json() if bot_response.content else {}
+        deployed: dict[str, Any] = raw if isinstance(raw, dict) else {}
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.text or "Failed to deploy Vexa bot"
         raise HTTPException(
-            status_code=exc.response.status_code, detail=detail
+            status_code=exc.response.status_code,
+            detail=exc.response.text or "Failed to deploy Vexa bot",
         ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -131,33 +162,30 @@ async def start_meeting(
         ) from exc
 
     vexa_meeting_id = str(
-        deployed_bot_data.get("id")
-        or deployed_bot_data.get("meeting_id")
-        or deployed_bot_data.get("vexa_meeting_id")
+        deployed.get("id")
+        or deployed.get("meeting_id")
+        or deployed.get("vexa_meeting_id")
         or f"{request.platform}:{request.native_id}:{uuid.uuid4().hex}"
     )
-    title = str(
-        deployed_bot_data.get("title") or f"{request.platform}:{request.native_id}"
-    )
-    status = str(deployed_bot_data.get("status") or "requested")
+    title = str(deployed.get("title") or f"{request.platform}:{request.native_id}")
+    status = str(deployed.get("status") or "requested")
 
     with SessionLocal() as db:
-        # 1. Check if the meeting already exists
-        existing_stmt = (
+        existing = db.execute(
             select(Meeting).where(Meeting.vexa_meeting_id == vexa_meeting_id).limit(1)
-        )
-        meeting = db.execute(existing_stmt).scalar_one_or_none()
+        ).scalar_one_or_none()
 
-        if meeting:
-            # 2. If it exists, just update its status and title
-            meeting.status = status
-            meeting.title = title
+        if existing:
+            existing.status = status
+            existing.title = title
+            meeting = existing
         else:
-            # 3. If it doesn't exist, create it
             meeting = Meeting(
                 vexa_meeting_id=vexa_meeting_id,
                 title=title,
                 status=status,
+                team_id=request.team_id,
+                created_by=user_id,
             )
             db.add(meeting)
 
@@ -185,7 +213,6 @@ async def start_meeting(
         )
 
     background_tasks.add_task(run_meeting_tasks)
-
     return {"meeting_id": meeting.id}
 
 
@@ -197,31 +224,24 @@ async def leave_meeting(
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
-
         platform, native_id = _get_local_meeting_context(meeting_id)
 
     vexa_api_key = os.getenv("VEXA_API_KEY", "")
 
     if platform and native_id and vexa_api_key:
-        headers = {
-            "X-API-Key": vexa_api_key,
-        }
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.delete(
                     f"http://host.docker.internal:8056/bots/{platform}/{native_id}",
-                    headers=headers,
+                    headers={"X-API-Key": vexa_api_key},
                 )
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            print(f"[Leave] Failed to remove bot: {exc}")
         except httpx.HTTPError as exc:
-            print(f"[Leave] Failed to contact Vexa service: {exc}")
+            print(f"[Leave] Failed to remove bot: {exc}")
 
     background_tasks.add_task(
         _finalize_meeting, meeting_id, platform or "", native_id or "", vexa_api_key
     )
-
     return {"ok": True}
 
 
@@ -235,7 +255,6 @@ async def _finalize_meeting(
             await sync_final_transcript_from_vexa(
                 meeting_id, platform, native_id, api_key
             )
-            print(f"[Leave] Synced final transcript for meeting {meeting_id}")
         except Exception as exc:
             print(f"[Leave] Transcript sync failed: {exc}")
 
@@ -243,7 +262,6 @@ async def _finalize_meeting(
         controller = ControllerAgent()
         try:
             await controller.generate_final_report(meeting_id, db)
-            print(f"[Leave] Generated final report for meeting {meeting_id}")
         except Exception as exc:
             print(f"[Leave] Failed to generate final report: {exc}")
 
@@ -254,7 +272,6 @@ async def explain_meeting(meeting_id: int, request: ClarityRequest) -> dict[str,
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
-
         controller = ControllerAgent()
         explanation = await controller.generate_instant_clarity(
             meeting_id=meeting_id,
@@ -262,7 +279,6 @@ async def explain_meeting(meeting_id: int, request: ClarityRequest) -> dict[str,
             mode=request.mode,
             last_x_minutes=request.last_x_minutes,
         )
-
     return {"explanation": explanation}
 
 
@@ -275,11 +291,8 @@ async def handle_vexa_webhook(
     webhook_secret = os.getenv("VEXA_WEBHOOK_SECRET", "").strip()
     if webhook_secret:
         auth_header = request.headers.get("authorization", "")
-        expected_header = f"Bearer {webhook_secret}"
-        if auth_header != expected_header:
-            raise HTTPException(
-                status_code=401, detail="Invalid webhook Authorization header"
-            )
+        if auth_header != f"Bearer {webhook_secret}":
+            raise HTTPException(status_code=401, detail="Invalid webhook Authorization header")
 
     raw_event_type = str(event.get("event_type") or event.get("event") or "").strip()
     event_type = raw_event_type.lower()
@@ -352,25 +365,37 @@ async def handle_vexa_webhook(
 
 
 @app.get("/api/meetings")
-def list_meetings() -> dict[str, Any]:
+def list_meetings(
+    team_id: int | None = Query(default=None),
+) -> dict[str, Any]:
     with SessionLocal() as db:
-        meetings = (
-            db.execute(select(Meeting).order_by(Meeting.created_at.desc()))
-            .scalars()
-            .all()
-        )
-        return {
-            "meetings": [
-                {
-                    "id": m.id,
-                    "title": m.title,
-                    "status": m.status,
-                    "summary": m.summary,
-                    "created_at": m.created_at.isoformat() if m.created_at else None,
-                }
-                for m in meetings
-            ]
-        }
+        stmt = select(Meeting).order_by(Meeting.created_at.desc())
+        if team_id is not None:
+            stmt = stmt.where(Meeting.team_id == team_id)
+        meetings = db.execute(stmt).scalars().all()
+
+        result = []
+        for m in meetings:
+            topic_rows = db.execute(
+                select(meeting_topics).where(meeting_topics.c.meeting_id == m.id)
+            ).all()
+            from app.db.models import Topic
+            topics = []
+            for row in topic_rows:
+                t = db.get(Topic, row.topic_id)
+                if t:
+                    topics.append({"id": t.id, "name": t.name, "color": t.color})
+
+            result.append({
+                "id": m.id,
+                "title": m.title,
+                "status": m.status,
+                "summary": m.summary,
+                "team_id": m.team_id,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "topics": topics,
+            })
+        return {"meetings": result}
 
 
 @app.get("/api/meetings/{meeting_id}")
@@ -384,9 +409,8 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
             "title": meeting.title,
             "status": meeting.status,
             "summary": meeting.summary,
-            "created_at": meeting.created_at.isoformat()
-            if meeting.created_at
-            else None,
+            "team_id": meeting.team_id,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
         }
 
 
@@ -430,15 +454,11 @@ def get_transcript(meeting_id: int) -> dict[str, Any]:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
-        chunks = (
-            db.execute(
-                select(TranscriptChunk)
-                .where(TranscriptChunk.meeting_id == meeting_id)
-                .order_by(TranscriptChunk.timestamp.asc())
-            )
-            .scalars()
-            .all()
-        )
+        chunks = db.execute(
+            select(TranscriptChunk)
+            .where(TranscriptChunk.meeting_id == meeting_id)
+            .order_by(TranscriptChunk.timestamp.asc())
+        ).scalars().all()
         return {
             "meeting_id": meeting_id,
             "status": meeting.status,
@@ -455,13 +475,19 @@ def get_transcript(meeting_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/actions")
-def list_all_actions() -> dict[str, Any]:
+def list_all_actions(
+    team_id: int | None = Query(default=None),
+) -> dict[str, Any]:
     with SessionLocal() as db:
-        rows = db.execute(
+        stmt = (
             select(AgentAction, Meeting.title, Meeting.created_at)
             .join(Meeting, AgentAction.meeting_id == Meeting.id)
             .order_by(AgentAction.id.desc())
-        ).all()
+        )
+        if team_id is not None:
+            stmt = stmt.where(Meeting.team_id == team_id)
+
+        rows = db.execute(stmt).all()
 
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
             "parking_lot": {"pending": [], "accepted": [], "rejected": []},
@@ -481,12 +507,8 @@ def list_all_actions() -> dict[str, Any]:
                 "content": a.content,
                 "status": a.status,
             }
-            if a.status == "accepted":
-                grouped[a.action_type]["accepted"].append(entry)
-            elif a.status == "rejected":
-                grouped[a.action_type]["rejected"].append(entry)
-            else:
-                grouped[a.action_type]["pending"].append(entry)
+            bucket = "accepted" if a.status == "accepted" else ("rejected" if a.status == "rejected" else "pending")
+            grouped[a.action_type][bucket].append(entry)
         return grouped
 
 
@@ -496,15 +518,11 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
-        rows = (
-            db.execute(
-                select(AgentAction)
-                .where(AgentAction.meeting_id == meeting_id)
-                .order_by(AgentAction.id.desc())
-            )
-            .scalars()
-            .all()
-        )
+        rows = db.execute(
+            select(AgentAction)
+            .where(AgentAction.meeting_id == meeting_id)
+            .order_by(AgentAction.id.desc())
+        ).scalars().all()
 
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
             "parking_lot": {"pending": [], "accepted": [], "rejected": []},
@@ -526,12 +544,8 @@ def list_actions(meeting_id: int) -> dict[str, Any]:
                 "content": a.content,
                 "status": a.status,
             }
-            if a.status == "accepted":
-                grouped[t]["accepted"].append(entry)
-            elif a.status == "rejected":
-                grouped[t]["rejected"].append(entry)
-            else:
-                grouped[t]["pending"].append(entry)
+            bucket = "accepted" if a.status == "accepted" else ("rejected" if a.status == "rejected" else "pending")
+            grouped[t][bucket].append(entry)
         return grouped
 
 
@@ -565,12 +579,7 @@ def review_action(
             ) from exc
         status = action.status
         content = action.content
-    return {
-        "ok": True,
-        "id": action_id,
-        "status": status,
-        "content": content,
-    }
+    return {"ok": True, "id": action_id, "status": status, "content": content}
 
 
 @app.get("/health", tags=["health"])
