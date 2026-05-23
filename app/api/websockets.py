@@ -19,6 +19,7 @@ router = APIRouter()
 async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
     await manager.connect(meeting_id, websocket)
     controller = ControllerAgent()
+    controller.load_pre_meeting_context(team_id="team_agile")
 
     try:
         # Send full transcript snapshot on connect

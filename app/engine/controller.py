@@ -340,6 +340,43 @@ class ControllerAgent:
     ) -> None:
         self._llm = OllamaClient(url=ollama_url, model=model, timeout=timeout)
         self._discussion = DiscussionEngine(self._llm)
+        self._pre_meeting_context = ""
+
+    def load_pre_meeting_context(self, team_id: str = "team_agile") -> None:
+        """Fetches the team's recent history from Mem0 to use during the live meeting."""
+        global memory, MEM0_SEARCH_ENABLED
+        if memory is not None and MEM0_SEARCH_ENABLED:
+            try:
+                print(
+                    f"[ControllerAgent] Fetching pre-meeting context for {team_id}..."
+                )
+                raw_memories = memory.search(
+                    query=(
+                        "What are the current active projects, recent technical "
+                        "decisions, and ongoing blockers for this team?"
+                    ),
+                    filters={"user_id": team_id},
+                )
+                if (
+                    raw_memories
+                    and isinstance(raw_memories, dict)
+                    and raw_memories.get("results")
+                ):
+                    memory_texts = [
+                        m.get("memory", "") for m in raw_memories["results"]
+                    ]
+                    formatted_memories = "\n".join(
+                        f"- {text}" for text in memory_texts if text
+                    )
+                    self._pre_meeting_context = (
+                        "--- PRE-MEETING CONTEXT (Past Knowledge) ---\n"
+                        f"{formatted_memories}"
+                    )
+                    print(
+                        "[ControllerAgent] Successfully loaded pre-meeting context."
+                    )
+            except Exception as exc:
+                print(f"[Memory Error] Failed to load pre-meeting context: {exc}")
 
     # -- Real-time summarisation + proposal detection --------------------
 
@@ -353,7 +390,9 @@ class ControllerAgent:
 
         prompt = (
             f"Transcript:\n{cleaned}\n\n"
-            "Analyze the utterance above and respond with the JSON format specified in your instructions."
+            f"{self._pre_meeting_context}\n\n"
+            "Analyze the utterance above using the provided context (if any), "
+            "and respond with the JSON format specified in your instructions."
         )
 
         async def _run(role: str, sys_prompt: str) -> tuple[str, dict]:
