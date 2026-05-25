@@ -182,3 +182,34 @@ INSTANT_CLARITY_BUSINESS = (
     "Keep it extremely concise (1-2 paragraphs). Do not formulate it as an email or a formal report — "
     "just give the immediate business clarification."
 )
+
+# ---------------------------------------------------------------------------
+# Defaults registry + team-aware loader
+# ---------------------------------------------------------------------------
+
+PROMPT_DEFAULTS: dict[str, str] = {
+    "realtime_scrum_master": REALTIME_SCRUM_MASTER_PROMPT,
+    "final_tech_lead": FINAL_REPORT_TECH_LEAD_PROMPT,
+    "final_product_manager": FINAL_REPORT_PRODUCT_MANAGER_PROMPT,
+    "discussion_tech_lead": DISCUSSION_TECH_LEAD_PROMPT,
+    "discussion_product_manager": DISCUSSION_PRODUCT_MANAGER_PROMPT,
+    "synthesis": FINAL_REPORT_SCRUM_MASTER_PROMPT,
+    "instant_clarity_technical": INSTANT_CLARITY_TECHNICAL,
+    "instant_clarity_business": INSTANT_CLARITY_BUSINESS,
+}
+
+
+def get_team_prompts(team_id: int | None, db) -> dict[str, str]:
+    """Returns PROMPT_DEFAULTS merged with any team-specific overrides stored in DB."""
+    result = dict(PROMPT_DEFAULTS)
+    if team_id is None:
+        return result
+    from sqlalchemy import select
+    from app.db.models import TeamPromptConfig
+    rows = db.execute(
+        select(TeamPromptConfig).where(TeamPromptConfig.team_id == team_id)
+    ).scalars().all()
+    for row in rows:
+        if row.prompt_key in result:
+            result[row.prompt_key] = row.prompt_text
+    return result

@@ -9,8 +9,9 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import get_current_user_id
-from app.db.models import Meeting, Team, TeamMembership, Topic, User, meeting_topics
+from app.db.models import Meeting, Team, TeamMembership, TeamPromptConfig, Topic, User, meeting_topics
 from app.db.session import SessionLocal
+from app.engine.prompts import PROMPT_DEFAULTS
 
 router = APIRouter(tags=["teams"])
 
@@ -351,6 +352,103 @@ def delete_topic(
         db.delete(topic)
         db.commit()
         return {"ok": True}
+
+
+# ── prompts ───────────────────────────────────────────────────────────────────
+
+VALID_PROMPT_KEYS = frozenset(PROMPT_DEFAULTS.keys())
+
+PROMPT_LABELS: dict[str, str] = {
+    "realtime_scrum_master": "Real-time Monitor",
+    "final_tech_lead": "Final Report: Tech Lead",
+    "final_product_manager": "Final Report: Product Manager",
+    "discussion_tech_lead": "Discussion: Tech Lead",
+    "discussion_product_manager": "Discussion: Product Manager",
+    "synthesis": "Final Synthesis",
+    "instant_clarity_technical": "Instant Clarity: Technical",
+    "instant_clarity_business": "Instant Clarity: Business",
+}
+
+
+class PromptUpdateRequest(BaseModel):
+    prompt_text: str
+
+
+@router.get("/api/teams/{team_id}/prompts")
+def list_prompts(
+    team_id: int, user_id: int = Depends(get_current_user_id)
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        _assert_owner(db, user_id, team_id)
+        overrides = {
+            row.prompt_key: row
+            for row in db.execute(
+                select(TeamPromptConfig).where(TeamPromptConfig.team_id == team_id)
+            ).scalars().all()
+        }
+        result = [
+            {
+                "key": key,
+                "label": PROMPT_LABELS[key],
+                "text": overrides[key].prompt_text if key in overrides else PROMPT_DEFAULTS[key],
+                "is_custom": key in overrides,
+                "updated_at": overrides[key].updated_at.isoformat() if key in overrides else None,
+            }
+            for key in PROMPT_LABELS
+        ]
+        return {"prompts": result}
+
+
+@router.put("/api/teams/{team_id}/prompts/{prompt_key}")
+def upsert_prompt(
+    team_id: int,
+    prompt_key: str,
+    req: PromptUpdateRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    if prompt_key not in VALID_PROMPT_KEYS:
+        raise HTTPException(status_code=400, detail=f"Invalid prompt key: {prompt_key}")
+    with SessionLocal() as db:
+        _assert_owner(db, user_id, team_id)
+        existing = db.execute(
+            select(TeamPromptConfig).where(
+                TeamPromptConfig.team_id == team_id,
+                TeamPromptConfig.prompt_key == prompt_key,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            existing.prompt_text = req.prompt_text.strip()
+        else:
+            db.add(TeamPromptConfig(
+                team_id=team_id,
+                prompt_key=prompt_key,
+                prompt_text=req.prompt_text.strip(),
+            ))
+        db.commit()
+        return {"key": prompt_key, "is_custom": True}
+
+
+@router.delete("/api/teams/{team_id}/prompts/{prompt_key}")
+def reset_prompt(
+    team_id: int,
+    prompt_key: str,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    if prompt_key not in VALID_PROMPT_KEYS:
+        raise HTTPException(status_code=400, detail=f"Invalid prompt key: {prompt_key}")
+    with SessionLocal() as db:
+        _assert_owner(db, user_id, team_id)
+        existing = db.execute(
+            select(TeamPromptConfig).where(
+                TeamPromptConfig.team_id == team_id,
+                TeamPromptConfig.prompt_key == prompt_key,
+            )
+        ).scalar_one_or_none()
+        if not existing:
+            raise HTTPException(status_code=404, detail="No custom prompt found for this key")
+        db.delete(existing)
+        db.commit()
+        return {"key": prompt_key, "is_custom": False}
 
 
 # ── meeting topics ─────────────────────────────────────────────────────────────

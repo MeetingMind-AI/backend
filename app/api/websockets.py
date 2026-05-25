@@ -11,6 +11,7 @@ from app.api.ws_manager import manager
 from app.db.models import AgentAction, Meeting, TranscriptChunk
 from app.db.session import SessionLocal
 from app.engine.controller import ControllerAgent
+from app.engine.prompts import get_team_prompts
 
 router = APIRouter()
 
@@ -20,6 +21,12 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
     await manager.connect(meeting_id, websocket)
     controller = ControllerAgent()
     controller.load_pre_meeting_context(team_id="team_agile")
+
+    # Resolve team prompts once per connection (cached for the duration of the meeting)
+    with SessionLocal() as db:
+        _meeting = db.get(Meeting, meeting_id)
+        _team_id = _meeting.team_id if _meeting else None
+        team_prompts = get_team_prompts(_team_id, db)
 
     try:
         # Send full transcript snapshot on connect
@@ -122,7 +129,7 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
             )
 
             try:
-                result = await controller.summarize(text)
+                result = await controller.summarize(text, team_prompts=team_prompts)
                 print(f"[Ollama Result] {speaker}: {result}")
             except Exception as exc:
                 print(f"Ollama Error: {exc}")

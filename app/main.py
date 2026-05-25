@@ -276,9 +276,11 @@ async def _finalize_meeting(
             print(f"[Leave] Transcript sync failed: {exc}")
 
     with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        team_id = meeting.team_id if meeting else None
         controller = ControllerAgent()
         try:
-            await controller.generate_final_report(meeting_id, db)
+            await controller.generate_final_report(meeting_id, db, team_id=team_id)
         except Exception as exc:
             print(f"[Leave] Failed to generate final report: {exc}")
 
@@ -301,6 +303,7 @@ async def explain_meeting(
             db_session=db,
             mode=request.mode,
             last_x_minutes=request.last_x_minutes,
+            team_id=meeting.team_id,
         )
     return {"explanation": explanation}
 

@@ -18,6 +18,7 @@ from app.engine.prompts import (
     DISCUSSION_PERSONA_PROMPTS,
     INSTANT_CLARITY_BUSINESS,
     INSTANT_CLARITY_TECHNICAL,
+    get_team_prompts,
 )
 
 DEFAULT_DISCUSSION_ROUNDS = 1
@@ -144,9 +145,14 @@ class DiscussionEngine:
         initial_reports: dict[str, str],
         transcript: str,
         num_rounds: int,
+        team_prompts: dict[str, str] | None = None,
     ) -> list[dict[str, str]]:
         """Execute *num_rounds* of Tech Lead ↔ PM discussion."""
         log: list[dict[str, str]] = []
+        resolved_personas = {
+            "tech_lead": (team_prompts or {}).get("discussion_tech_lead") or DISCUSSION_PERSONA_PROMPTS["tech_lead"],
+            "product_manager": (team_prompts or {}).get("discussion_product_manager") or DISCUSSION_PERSONA_PROMPTS["product_manager"],
+        }
 
         for round_num in range(1, num_rounds + 1):
             print(f"[Discussion] meeting={meeting_id} round {round_num}/{num_rounds}")
@@ -161,7 +167,7 @@ class DiscussionEngine:
 
             tasks = [
                 self._discuss(role, prompt, context, meeting_id, round_num)
-                for role, prompt in DISCUSSION_PERSONA_PROMPTS.items()
+                for role, prompt in resolved_personas.items()
             ]
             results = await asyncio.gather(*tasks)
 
@@ -380,7 +386,7 @@ class ControllerAgent:
 
     # -- Real-time summarisation + proposal detection --------------------
 
-    async def summarize(self, text: str) -> dict[str, dict]:
+    async def summarize(self, text: str, team_prompts: dict[str, str] | None = None) -> dict[str, dict]:
         cleaned = " ".join(text.split()).strip()
         if not cleaned:
             return {
@@ -395,6 +401,10 @@ class ControllerAgent:
             "and respond with the JSON format specified in your instructions."
         )
 
+        persona_prompts = {
+            "scrum_master": (team_prompts or {}).get("realtime_scrum_master") or REALTIME_PERSONA_PROMPTS["scrum_master"],
+        }
+
         async def _run(role: str, sys_prompt: str) -> tuple[str, dict]:
             try:
                 raw = await self._llm.generate(prompt=prompt, system_prompt=sys_prompt)
@@ -408,7 +418,7 @@ class ControllerAgent:
                 return role, {"text": "IGNORE", "proposal": None}
 
         results = await asyncio.gather(
-            *[_run(r, p) for r, p in REALTIME_PERSONA_PROMPTS.items()]
+            *[_run(r, p) for r, p in persona_prompts.items()]
         )
         return dict(results)
 
@@ -420,6 +430,7 @@ class ControllerAgent:
         db_session: Session,
         mode: str,
         last_x_minutes: int | None = None,
+        team_id: int | None = None,
     ) -> str:
         transcript_context = TranscriptLoader.load_recent(
             meeting_id, db_session, last_x_minutes
@@ -431,10 +442,11 @@ class ControllerAgent:
         if word_count < 10:
             return "The transcript is too short to generate a meaningful clarification."
 
+        prompts = get_team_prompts(team_id, db_session)
         system_prompt = (
-            INSTANT_CLARITY_BUSINESS
+            prompts["instant_clarity_business"]
             if mode.lower() == "business"
-            else INSTANT_CLARITY_TECHNICAL
+            else prompts["instant_clarity_technical"]
         )
 
         prompt = (
@@ -455,10 +467,13 @@ class ControllerAgent:
         meeting_id: int,
         db_session: Session,
         num_rounds: int | None = None,
+        team_id: int | None = None,
     ) -> str:
         if num_rounds is None:
             num_rounds = DEFAULT_DISCUSSION_ROUNDS
         num_rounds = max(num_rounds, 0)
+
+        prompts = get_team_prompts(team_id, db_session)
 
         # 1. Load transcript
         transcript = TranscriptLoader.load(meeting_id, db_session)
@@ -485,7 +500,7 @@ class ControllerAgent:
             f"--- RELEVANT PAST MEMORIES & CONTEXT ---\n{past_memories}\n\n"
             f"--- CURRENT TRANSCRIPT ---\n{transcript}"
         )
-        initial_reports = await self._run_initial_analyses(base_prompt)
+        initial_reports = await self._run_initial_analyses(base_prompt, prompts)
 
         # 3. Discussion rounds (Tech Lead ↔ PM)
         discussion_log: list[dict[str, str]] = []
@@ -498,6 +513,7 @@ class ControllerAgent:
                 initial_reports=initial_reports,
                 transcript=transcript,
                 num_rounds=num_rounds,
+                team_prompts=prompts,
             )
 
         # 4. Scrum Master synthesis
@@ -509,7 +525,7 @@ class ControllerAgent:
         )
         scrum_master_result = await self._llm.generate(
             prompt=synthesis_prompt,
-            system_prompt=SYNTHESIS_PROMPT,
+            system_prompt=prompts["synthesis"],
         )
 
         # 5. Assemble and persist
@@ -544,7 +560,12 @@ class ControllerAgent:
 
     # -- private helpers ---------------------------------------------------
 
-    async def _run_initial_analyses(self, prompt: str) -> dict[str, str]:
+    async def _run_initial_analyses(self, prompt: str, team_prompts: dict[str, str] | None = None) -> dict[str, str]:
+        resolved = {
+            "tech_lead": (team_prompts or {}).get("final_tech_lead") or INITIAL_ANALYSIS_PROMPTS["tech_lead"],
+            "product_manager": (team_prompts or {}).get("final_product_manager") or INITIAL_ANALYSIS_PROMPTS["product_manager"],
+        }
+
         async def _fetch(role: str, sys_prompt: str) -> tuple[str, str]:
             try:
                 return role, await self._llm.generate(
@@ -555,7 +576,7 @@ class ControllerAgent:
                 return role, "{}"
 
         results = await asyncio.gather(
-            *[_fetch(r, p) for r, p in INITIAL_ANALYSIS_PROMPTS.items()]
+            *[_fetch(r, p) for r, p in resolved.items()]
         )
         return dict(results)
 
