@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -18,7 +18,7 @@ from app.api.teams import router as teams_router
 from app.api.websockets import router as websocket_router
 from app.api.ws_manager import manager
 from app.db.base import Base
-from app.db.models import AgentAction, Meeting, Session, TranscriptChunk, meeting_topics
+from app.db.models import AgentAction, Meeting, Session, TeamMembership, TranscriptChunk, meeting_topics
 from app.db.session import SessionLocal, engine
 from app.engine.controller import ControllerAgent
 from app.engine.vexa_client import (
@@ -116,6 +116,17 @@ def _user_id_from_cookie(mm_session: str | None) -> int | None:
         return int(row.user_id) if row else None
 
 
+def _assert_member(db: Any, user_id: int, team_id: int) -> None:
+    row = db.execute(
+        select(TeamMembership).where(
+            TeamMembership.user_id == user_id,
+            TeamMembership.team_id == team_id,
+        )
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=403, detail="Not a member of this team")
+
+
 # ── meeting endpoints ─────────────────────────────────────────────────────────
 
 
@@ -123,9 +134,11 @@ def _user_id_from_cookie(mm_session: str | None) -> int | None:
 async def start_meeting(
     request: MeetingStartRequest,
     background_tasks: BackgroundTasks,
-    mm_session: str | None = Cookie(default=None),
+    user_id: int = Depends(get_current_user_id),
 ) -> dict[str, int]:
-    user_id = _user_id_from_cookie(mm_session)
+    if request.team_id is not None:
+        with SessionLocal() as db:
+            _assert_member(db, user_id, request.team_id)
 
     bot_payload = {
         "platform": request.platform,
@@ -218,12 +231,16 @@ async def start_meeting(
 
 @app.post("/api/meetings/{meeting_id}/leave")
 async def leave_meeting(
-    meeting_id: int, background_tasks: BackgroundTasks
+    meeting_id: int,
+    background_tasks: BackgroundTasks,
+    user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
         platform, native_id = _get_local_meeting_context(meeting_id)
 
     vexa_api_key = os.getenv("VEXA_API_KEY", "")
@@ -267,11 +284,17 @@ async def _finalize_meeting(
 
 
 @app.post("/api/meetings/{meeting_id}/explain")
-async def explain_meeting(meeting_id: int, request: ClarityRequest) -> dict[str, str]:
+async def explain_meeting(
+    meeting_id: int,
+    request: ClarityRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, str]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
         controller = ControllerAgent()
         explanation = await controller.generate_instant_clarity(
             meeting_id=meeting_id,
@@ -367,8 +390,11 @@ async def handle_vexa_webhook(
 @app.get("/api/meetings")
 def list_meetings(
     team_id: int | None = Query(default=None),
+    user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     with SessionLocal() as db:
+        if team_id is not None:
+            _assert_member(db, user_id, team_id)
         stmt = select(Meeting).order_by(Meeting.created_at.desc())
         if team_id is not None:
             stmt = stmt.where(Meeting.team_id == team_id)
@@ -399,11 +425,16 @@ def list_meetings(
 
 
 @app.get("/api/meetings/{meeting_id}")
-def get_meeting(meeting_id: int) -> dict[str, Any]:
+def get_meeting(
+    meeting_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
         from app.db.models import Topic
         topic_rows = db.execute(
             select(meeting_topics).where(meeting_topics.c.meeting_id == meeting_id)
@@ -425,11 +456,17 @@ def get_meeting(meeting_id: int) -> dict[str, Any]:
 
 
 @app.patch("/api/meetings/{meeting_id}")
-def rename_meeting(meeting_id: int, request: MeetingRenameRequest) -> dict[str, Any]:
+def rename_meeting(
+    meeting_id: int,
+    request: MeetingRenameRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
         meeting.title = request.title
         try:
             db.commit()
@@ -442,11 +479,16 @@ def rename_meeting(meeting_id: int, request: MeetingRenameRequest) -> dict[str, 
 
 
 @app.delete("/api/meetings/{meeting_id}")
-def delete_meeting_record(meeting_id: int) -> dict[str, Any]:
+def delete_meeting_record(
+    meeting_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
         try:
             db.delete(meeting)
             db.commit()
@@ -459,11 +501,16 @@ def delete_meeting_record(meeting_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/meetings/{meeting_id}/transcript")
-def get_transcript(meeting_id: int) -> dict[str, Any]:
+def get_transcript(
+    meeting_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
         chunks = db.execute(
             select(TranscriptChunk)
             .where(TranscriptChunk.meeting_id == meeting_id)
@@ -487,8 +534,11 @@ def get_transcript(meeting_id: int) -> dict[str, Any]:
 @app.get("/api/actions")
 def list_all_actions(
     team_id: int | None = Query(default=None),
+    user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     with SessionLocal() as db:
+        if team_id is not None:
+            _assert_member(db, user_id, team_id)
         stmt = (
             select(AgentAction, Meeting.title, Meeting.created_at)
             .join(Meeting, AgentAction.meeting_id == Meeting.id)
@@ -523,11 +573,16 @@ def list_all_actions(
 
 
 @app.get("/api/meetings/{meeting_id}/actions")
-def list_actions(meeting_id: int) -> dict[str, Any]:
+def list_actions(
+    meeting_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
         rows = db.execute(
             select(AgentAction)
             .where(AgentAction.meeting_id == meeting_id)
@@ -566,12 +621,17 @@ class ActionReviewRequest(BaseModel):
 
 @app.patch("/api/meetings/{meeting_id}/actions/{action_id}")
 def review_action(
-    meeting_id: int, action_id: int, request: ActionReviewRequest
+    meeting_id: int,
+    action_id: int,
+    request: ActionReviewRequest,
+    user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
         action = db.get(AgentAction, action_id)
         if not action or action.meeting_id != meeting_id:
             raise HTTPException(status_code=404, detail="Action not found")
