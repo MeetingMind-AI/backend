@@ -107,6 +107,9 @@ class Team(Base):
     meetings: Mapped[list[Meeting]] = relationship(
         back_populates="team", foreign_keys="Meeting.team_id"
     )
+    prompt_configs: Mapped[list[TeamPromptConfig]] = relationship(
+        back_populates="team", cascade="all, delete-orphan"
+    )
 
 
 class TeamMembership(Base):
@@ -223,3 +226,20 @@ class Topic(Base):
     meetings: Mapped[list[Meeting]] = relationship(
         secondary=meeting_topics, back_populates="topics"
     )
+
+
+class TeamPromptConfig(Base):
+    __tablename__ = "team_prompt_configs"
+    __table_args__ = (UniqueConstraint("team_id", "prompt_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    team_id: Mapped[int] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    prompt_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    team: Mapped[Team] = relationship(back_populates="prompt_configs")
