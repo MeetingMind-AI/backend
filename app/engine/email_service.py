@@ -189,15 +189,21 @@ async def send_meeting_summary_email(
     - No-ops silently when SMTP is not configured.
     - Logs errors but **never** raises — the caller's flow must not break.
     """
+    print(f"[Email] Starting email notification for meeting {meeting_id} (team_id={team_id})")
+
     cfg = _smtp_config()
     if cfg is None:
         print("[Email] SMTP not configured — skipping email notifications.")
         return
 
+    print(f"[Email] SMTP config loaded: host={cfg['host']}:{cfg['port']}, from={cfg['from_addr']}, tls={cfg['use_tls']}")
+
     recipients = _get_team_member_emails(team_id)
     if not recipients:
         print(f"[Email] No team members found for team_id={team_id} — skipping.")
         return
+
+    print(f"[Email] Found {len(recipients)} recipient(s): {', '.join(recipients)}")
 
     subject = f"Meeting Summary: {meeting_title}"
     html_body = _build_summary_html(meeting_title, summary)
@@ -210,6 +216,9 @@ async def send_meeting_summary_email(
     msg.attach(MIMEText(plain_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
+    print(f"[Email] Email composed — subject=\"{subject}\", html={len(html_body)} bytes, plain={len(plain_body)} bytes")
+    print(f"[Email] Connecting to SMTP server {cfg['host']}:{cfg['port']}...")
+
     try:
         await aiosmtplib.send(
             msg,
@@ -221,8 +230,9 @@ async def send_meeting_summary_email(
             recipients=recipients,
         )
         print(
-            f"[Email] Summary for meeting {meeting_id} sent to "
+            f"[Email] ✅ Summary for meeting {meeting_id} sent successfully to "
             f"{len(recipients)} recipient(s): {', '.join(recipients)}"
         )
     except Exception as exc:
-        print(f"[Email] Failed to send summary for meeting {meeting_id}: {exc}")
+        print(f"[Email] ❌ Failed to send summary for meeting {meeting_id}: {type(exc).__name__}: {exc}")
+
