@@ -1,0 +1,81 @@
+name: File Size Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-file-sizes:
+    name: Check for files that should be refactored
+    runs-on: ubuntu-latest
+
+    env:
+      THRESHOLD: 200   # lines — any file above this triggers a failure
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check file sizes and build ranking
+        id: check
+        run: |
+          echo "## File Size Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Collect all relevant files with their line counts
+          TMPFILE=$(mktemp)
+
+          find . \
+            -not -path './.git/*' \
+            -not -path '*/.venv/*' \
+            -not -path '*/__pycache__/*' \
+            -name "*.py" \
+          | while read -r file; do
+              lines=$(wc -l < "$file")
+              echo "$lines $file"
+            done | sort -rn > "$TMPFILE"
+
+          # ── Ranking ──────────────────────────────────────────────────────────
+          echo "### Biggest files (all tracked)" >> $GITHUB_STEP_SUMMARY
+          echo "| Rank | Lines | File |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----:|------:|------|" >> $GITHUB_STEP_SUMMARY
+
+          rank=1
+          while IFS=" " read -r lines file; do
+            echo "| $rank | $lines | \`$file\` |" >> $GITHUB_STEP_SUMMARY
+            rank=$((rank + 1))
+          done < "$TMPFILE"
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # ── Threshold check ───────────────────────────────────────────────────
+          echo "### Files exceeding $THRESHOLD lines ⚠️" >> $GITHUB_STEP_SUMMARY
+          echo "| Lines | File |" >> $GITHUB_STEP_SUMMARY
+          echo "|------:|------|" >> $GITHUB_STEP_SUMMARY
+
+          FAILED=0
+          while IFS=" " read -r lines file; do
+            if [ "$lines" -gt "$THRESHOLD" ]; then
+              echo "| $lines | \`$file\` |" >> $GITHUB_STEP_SUMMARY
+              echo "::error file=$file,title=File too large::$lines lines (limit: $THRESHOLD) — consider splitting into smaller modules"
+              FAILED=1
+            fi
+          done < "$TMPFILE"
+
+          if [ "$FAILED" -eq 0 ]; then
+            echo "| — | All files are within the $THRESHOLD line limit ✅ |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          rm "$TMPFILE"
+          echo "FAILED=$FAILED" >> $GITHUB_OUTPUT
+
+      - name: Fail if oversized files found
+        if: steps.check.outputs.FAILED == '1'
+        run: |
+          echo ""
+          echo "One or more files exceed the $THRESHOLD line limit."
+          echo "Consider splitting them into smaller modules."
+          echo ""
+          echo "Threshold can be adjusted in .github/workflows/file-size-check.yml"
+          exit 1
