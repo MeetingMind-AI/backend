@@ -496,6 +496,55 @@ Because Vexa is running locally, these URLs should point to the Vexa container o
   - **What it is:** Polling cadence fallback (in seconds) in case the WebSocket disconnects.
   - **How to get it:** Defaults to `10`. No setup required.
 
+### Email Notifications (SendGrid)
+
+When a meeting ends and its summary is generated, the system can automatically email the report to every member of the meeting's team. This feature is **disabled by default** — it activates only when `SMTP_HOST` is set.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SMTP_HOST` | ✅ | — | SMTP server hostname. Set to `smtp.sendgrid.net` for SendGrid. |
+| `SMTP_PORT` | — | `587` | SMTP server port. `587` works for SendGrid with STARTTLS. |
+| `SMTP_USER` | ✅ | — | Must be the literal string `apikey` for SendGrid. |
+| `SMTP_PASSWORD` | ✅ | — | Your SendGrid API key (starts with `SG.`). |
+| `SMTP_FROM` | ✅ | `SMTP_USER` | The verified sender email address configured in SendGrid. |
+| `SMTP_USE_TLS` | — | `true` | Enable STARTTLS. Keep `true` for SendGrid. |
+
+#### Setup steps
+
+1. **Create a SendGrid account** at [sendgrid.com](https://sendgrid.com/) if you don't have one.
+
+2. **Verify a sender identity** — SendGrid requires a verified "From" address before it will deliver email:
+   - Go to **Settings → Sender Authentication** in the SendGrid dashboard.
+   - Either verify a **Single Sender** (quickest for development) or authenticate your entire domain (recommended for production).
+   - Note the verified email address — you'll use it as `SMTP_FROM`.
+
+3. **Generate an API key:**
+   - Go to **Settings → API Keys → Create API Key**.
+   - Choose **Restricted Access** and enable only **Mail Send → Full Access**.
+   - Copy the generated key (it starts with `SG.` and is only shown once).
+
+4. **Add these variables to your `.env` file:**
+   ```env
+   SMTP_HOST=smtp.sendgrid.net
+   SMTP_PORT=587
+   SMTP_USER=apikey
+   SMTP_PASSWORD=SG.xxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   SMTP_FROM=your-verified-sender@yourdomain.com
+   ```
+
+5. **Restart the backend** to pick up the new configuration:
+   ```bash
+   docker compose restart backend
+   ```
+
+6. **Verify** that email is working by checking the logs after a meeting ends:
+   ```bash
+   docker compose logs -f backend | grep "\[Email\]"
+   ```
+   - ✅ `[Email] Summary for meeting 5 sent to 3 recipient(s): alice@..., bob@..., carol@...`
+   - ⚠️ `[Email] SMTP not configured — skipping email notifications.` — means `SMTP_HOST` is not set.
+   - ❌ `[Email] Failed to send summary for meeting 5: ...` — check your API key and sender verification.
+
 ## Transcript Ingestion Strategy (REST API Polling)
 
 - We leverage the cleaner Vexa 0.10.6 API via `GET /transcripts/{platform}/{native_id}`.

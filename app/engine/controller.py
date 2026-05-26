@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Meeting, TranscriptChunk
+from app.engine.email_service import send_meeting_summary_email
 from app.engine.prompts import (
     REALTIME_PERSONA_PROMPTS,
     INITIAL_ANALYSIS_PROMPTS,
@@ -559,6 +560,21 @@ class ControllerAgent:
                 )
             except Exception as e:
                 print(f"[Memory Error] Failed to save memories to Mem0: {e}")
+
+        # 6. Send email notification to team members
+        if team_id is not None:
+            meeting = db_session.get(Meeting, meeting_id)
+            meeting_title = meeting.title if meeting else f"Meeting #{meeting_id}"
+            try:
+                await send_meeting_summary_email(
+                    meeting_id=meeting_id,
+                    team_id=team_id,
+                    summary=report,
+                    meeting_title=meeting_title,
+                )
+            except Exception as exc:
+                print(f"[Email] Failed to send summary emails: {exc}")
+
         return json.dumps(report)
 
     # -- private helpers ---------------------------------------------------
