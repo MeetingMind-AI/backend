@@ -18,8 +18,15 @@ from app.engine.prompts import (
     DISCUSSION_PERSONA_PROMPTS,
     INSTANT_CLARITY_BUSINESS,
     INSTANT_CLARITY_TECHNICAL,
+    PROMPT_DEFAULTS,
     get_team_prompts,
 )
+
+
+class _SafeFormat(dict):
+    """dict subclass that leaves unknown {placeholders} as-is instead of raising KeyError."""
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
 
 DEFAULT_DISCUSSION_ROUNDS = 1
 
@@ -394,11 +401,9 @@ class ControllerAgent:
                 for role in REALTIME_PERSONA_PROMPTS
             }
 
-        prompt = (
-            f"Transcript:\n{cleaned}\n\n"
-            f"{self._pre_meeting_context}\n\n"
-            "Analyze the utterance above using the provided context (if any), "
-            "and respond with the JSON format specified in your instructions."
+        user_template = (team_prompts or {}).get("realtime_user") or PROMPT_DEFAULTS["realtime_user"]
+        prompt = user_template.format_map(
+            _SafeFormat(transcript=cleaned, pre_meeting_context=self._pre_meeting_context)
         )
 
         persona_prompts = {
@@ -449,10 +454,8 @@ class ControllerAgent:
             else prompts["instant_clarity_technical"]
         )
 
-        prompt = (
-            f"Here is the meeting transcript context:\n"
-            f"{transcript_context}\n\n"
-            f"Provide your instant clarification strictly based only on the transcript lines above."
+        prompt = prompts["instant_clarity_user"].format_map(
+            _SafeFormat(transcript_context=transcript_context)
         )
         try:
             return await self._llm.generate(prompt=prompt, system_prompt=system_prompt)

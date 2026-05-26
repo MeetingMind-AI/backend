@@ -156,6 +156,59 @@ DISCUSSION_PERSONA_PROMPTS = {
 }
 
 # ---------------------------------------------------------------------------
+# User-turn prompt templates (injected data — not persona instructions)
+# Use {variable} placeholders; unknown placeholders are left as-is.
+# ---------------------------------------------------------------------------
+
+REALTIME_USER_PROMPT = (
+    "Transcript:\n{transcript}\n\n"
+    "{pre_meeting_context}\n\n"
+    "Analyze the utterance above using the provided context (if any), "
+    "and respond with the JSON format specified in your instructions."
+)
+
+INSTANT_CLARITY_USER_PROMPT = (
+    "Here is the meeting transcript context:\n"
+    "{transcript_context}\n\n"
+    "Provide your instant clarification strictly based only on the transcript lines above."
+)
+
+INITIAL_ANALYSIS_USER_PROMPT = (
+    "Meeting ID: {meeting_id}\n\n"
+    "--- RELEVANT PAST MEMORIES & CONTEXT ---\n"
+    "{past_memories}\n\n"
+    "--- CURRENT TRANSCRIPT ---\n"
+    "{transcript}"
+)
+
+DISCUSSION_USER_PROMPT = (
+    "Meeting ID: {meeting_id}\n\n"
+    "=== MEETING TRANSCRIPT ===\n"
+    "{transcript}\n\n"
+    "=== INITIAL ANALYSES ===\n"
+    "--- Tech Lead (Initial) ---\n"
+    "{tech_lead_report}\n\n"
+    "--- Product Manager (Initial) ---\n"
+    "{pm_report}\n\n"
+    "=== DISCUSSION HISTORY ===\n"
+    "{discussion_history}\n\n"
+    "=== YOUR TURN: Discussion Round {round_num} ===\n"
+    "Review all the above and respond according to your role's discussion format."
+)
+
+SYNTHESIS_USER_PROMPT = (
+    "Meeting ID: {meeting_id}\n\n"
+    "--- Tech Lead Findings ---\n"
+    "{tech_lead_report}\n\n"
+    "--- Product Manager Findings ---\n"
+    "{pm_report}\n\n"
+    "--- Cross-Functional Discussion ---\n"
+    "{discussion_log}\n\n"
+    "--- Full Transcript ---\n"
+    "{transcript}"
+)
+
+# ---------------------------------------------------------------------------
 # Instant Clarity prompts (used during live meeting for immediate simplification)
 # ---------------------------------------------------------------------------
 
@@ -187,15 +240,28 @@ INSTANT_CLARITY_BUSINESS = (
 # Defaults registry + team-aware loader
 # ---------------------------------------------------------------------------
 
+PROMPT_READONLY_KEYS: frozenset[str] = frozenset({
+    "realtime_user",
+    "initial_analysis_user",
+    "discussion_user",
+    "synthesis_user",
+    "instant_clarity_user",
+})
+
 PROMPT_DEFAULTS: dict[str, str] = {
     "realtime_scrum_master": REALTIME_SCRUM_MASTER_PROMPT,
+    "realtime_user": REALTIME_USER_PROMPT,
     "final_tech_lead": FINAL_REPORT_TECH_LEAD_PROMPT,
     "final_product_manager": FINAL_REPORT_PRODUCT_MANAGER_PROMPT,
+    "initial_analysis_user": INITIAL_ANALYSIS_USER_PROMPT,
     "discussion_tech_lead": DISCUSSION_TECH_LEAD_PROMPT,
     "discussion_product_manager": DISCUSSION_PRODUCT_MANAGER_PROMPT,
+    "discussion_user": DISCUSSION_USER_PROMPT,
     "synthesis": FINAL_REPORT_SCRUM_MASTER_PROMPT,
+    "synthesis_user": SYNTHESIS_USER_PROMPT,
     "instant_clarity_technical": INSTANT_CLARITY_TECHNICAL,
     "instant_clarity_business": INSTANT_CLARITY_BUSINESS,
+    "instant_clarity_user": INSTANT_CLARITY_USER_PROMPT,
 }
 
 

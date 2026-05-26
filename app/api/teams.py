@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.deps import get_current_user_id
 from app.db.models import Meeting, Team, TeamMembership, TeamPromptConfig, Topic, User, meeting_topics
 from app.db.session import SessionLocal
-from app.engine.prompts import PROMPT_DEFAULTS
+from app.engine.prompts import PROMPT_DEFAULTS, PROMPT_READONLY_KEYS
 
 router = APIRouter(tags=["teams"])
 
@@ -360,13 +360,42 @@ VALID_PROMPT_KEYS = frozenset(PROMPT_DEFAULTS.keys())
 
 PROMPT_LABELS: dict[str, str] = {
     "realtime_scrum_master": "Real-time Monitor",
+    "realtime_user": "Real-time: User Prompt",
     "final_tech_lead": "Final Report: Tech Lead",
     "final_product_manager": "Final Report: Product Manager",
+    "initial_analysis_user": "Final Report: User Prompt",
     "discussion_tech_lead": "Discussion: Tech Lead",
     "discussion_product_manager": "Discussion: Product Manager",
+    "discussion_user": "Discussion: User Prompt",
     "synthesis": "Final Synthesis",
+    "synthesis_user": "Synthesis: User Prompt",
     "instant_clarity_technical": "Instant Clarity: Technical",
     "instant_clarity_business": "Instant Clarity: Business",
+    "instant_clarity_user": "Instant Clarity: User Prompt",
+}
+
+PROMPT_DESCRIPTIONS: dict[str, str] = {
+    "realtime_scrum_master": "Sent as the system prompt during live transcript ingestion. Defines how each utterance is classified — summary, to-do, parking lot, or scheduling request — and enforces the JSON output format.",
+    "realtime_user": "Data wrapper sent alongside the system prompt during live monitoring. Injects the raw transcript utterance and any pre-meeting context loaded from memory.",
+    "final_tech_lead": "System prompt for the Tech Lead's initial independent analysis when a meeting ends. Controls the persona, focus areas (architecture, blockers, decisions), and the JSON structure of its output.",
+    "final_product_manager": "System prompt for the Product Manager's initial independent analysis when a meeting ends. Controls the persona, focus areas (features, UX, roadmap), and the JSON structure of its output.",
+    "initial_analysis_user": "Data context sent to both Tech Lead and PM during their parallel initial analysis. Contains the meeting ID, relevant past memories from Mem0, and the full transcript.",
+    "discussion_tech_lead": "System prompt used by the Tech Lead during the cross-functional debate rounds (Tech Lead ↔ PM). Defines how it responds to the PM's analysis and structures its reply.",
+    "discussion_product_manager": "System prompt used by the Product Manager during the cross-functional debate rounds (Tech Lead ↔ PM). Defines how it responds to the Tech Lead's analysis and structures its reply.",
+    "discussion_user": "Full context bundle sent to each persona at every discussion round. Includes the transcript, both initial analyses, and the history of prior rounds.",
+    "synthesis": "System prompt for the Scrum Master's final synthesis step. This AI reads all analyses and discussion output and produces the master JSON report shown in the meeting summary.",
+    "synthesis_user": "Data bundle sent to the Scrum Master for synthesis. Contains Tech Lead findings, PM findings, the cross-functional discussion log, and the full transcript.",
+    "instant_clarity_technical": "System prompt for the 'Explain Technical' button during a live meeting. Defines the Senior Engineer mentor persona — tone, depth, and what to include or omit.",
+    "instant_clarity_business": "System prompt for the 'Explain Business' button during a live meeting. Defines the Executive PM persona — business framing, conciseness, and what to focus on.",
+    "instant_clarity_user": "Data wrapper for Instant Clarity requests. Injects the recent transcript context and the fixed instruction to stay strictly within what was said.",
+}
+
+PROMPT_VARIABLES: dict[str, str] = {
+    "realtime_user": "{transcript}, {pre_meeting_context}",
+    "initial_analysis_user": "{meeting_id}, {past_memories}, {transcript}",
+    "discussion_user": "{meeting_id}, {transcript}, {tech_lead_report}, {pm_report}, {discussion_history}, {round_num}",
+    "synthesis_user": "{meeting_id}, {tech_lead_report}, {pm_report}, {discussion_log}, {transcript}",
+    "instant_clarity_user": "{transcript_context}",
 }
 
 
@@ -392,7 +421,10 @@ def list_prompts(
                 "label": PROMPT_LABELS[key],
                 "text": overrides[key].prompt_text if key in overrides else PROMPT_DEFAULTS[key],
                 "is_custom": key in overrides,
+                "readonly": key in PROMPT_READONLY_KEYS,
+                "description": PROMPT_DESCRIPTIONS.get(key),
                 "updated_at": overrides[key].updated_at.isoformat() if key in overrides else None,
+                "variables": PROMPT_VARIABLES.get(key),
             }
             for key in PROMPT_LABELS
         ]
@@ -408,6 +440,8 @@ def upsert_prompt(
 ) -> dict[str, Any]:
     if prompt_key not in VALID_PROMPT_KEYS:
         raise HTTPException(status_code=400, detail=f"Invalid prompt key: {prompt_key}")
+    if prompt_key in PROMPT_READONLY_KEYS:
+        raise HTTPException(status_code=400, detail=f"Prompt '{prompt_key}' is read-only and cannot be customized")
     with SessionLocal() as db:
         _assert_owner(db, user_id, team_id)
         existing = db.execute(
@@ -436,6 +470,8 @@ def reset_prompt(
 ) -> dict[str, Any]:
     if prompt_key not in VALID_PROMPT_KEYS:
         raise HTTPException(status_code=400, detail=f"Invalid prompt key: {prompt_key}")
+    if prompt_key in PROMPT_READONLY_KEYS:
+        raise HTTPException(status_code=400, detail=f"Prompt '{prompt_key}' is read-only and cannot be customized")
     with SessionLocal() as db:
         _assert_owner(db, user_id, team_id)
         existing = db.execute(
