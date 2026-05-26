@@ -14,6 +14,7 @@ variables:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -39,7 +40,15 @@ def _smtp_config() -> dict[str, Any] | None:
     user = os.getenv("SMTP_USER", "").strip()
     password = os.getenv("SMTP_PASSWORD", "").strip()
     from_addr = os.getenv("SMTP_FROM", "").strip() or user
-    use_tls = os.getenv("SMTP_USE_TLS", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    # Port 465 = implicit SSL/TLS (use_tls), Port 587 = STARTTLS (start_tls)
+    if port == 465:
+        use_tls = True
+        start_tls = False
+    else:
+        use_tls = False
+        start_tls = os.getenv("SMTP_USE_TLS", "true").strip().lower() in {"1", "true", "yes", "on"}
+
     return {
         "host": host,
         "port": port,
@@ -47,6 +56,7 @@ def _smtp_config() -> dict[str, Any] | None:
         "password": password,
         "from_addr": from_addr,
         "use_tls": use_tls,
+        "start_tls": start_tls,
     }
 
 
@@ -189,21 +199,21 @@ async def send_meeting_summary_email(
     - No-ops silently when SMTP is not configured.
     - Logs errors but **never** raises — the caller's flow must not break.
     """
-    print(f"[Email] Starting email notification for meeting {meeting_id} (team_id={team_id})")
+    print(f"[Email] Starting email notification for meeting {meeting_id} (team_id={team_id})", flush=True)
 
     cfg = _smtp_config()
     if cfg is None:
-        print("[Email] SMTP not configured — skipping email notifications.")
+        print("[Email] SMTP not configured — skipping email notifications.", flush=True)
         return
 
-    print(f"[Email] SMTP config loaded: host={cfg['host']}:{cfg['port']}, from={cfg['from_addr']}, tls={cfg['use_tls']}")
+    print(f"[Email] SMTP config loaded: host={cfg['host']}:{cfg['port']}, from={cfg['from_addr']}, tls={cfg['use_tls']}", flush=True)
 
     recipients = _get_team_member_emails(team_id)
     if not recipients:
-        print(f"[Email] No team members found for team_id={team_id} — skipping.")
+        print(f"[Email] No team members found for team_id={team_id} — skipping.", flush=True)
         return
 
-    print(f"[Email] Found {len(recipients)} recipient(s): {', '.join(recipients)}")
+    print(f"[Email] Found {len(recipients)} recipient(s): {', '.join(recipients)}", flush=True)
 
     subject = f"Meeting Summary: {meeting_title}"
     html_body = _build_summary_html(meeting_title, summary)
@@ -216,23 +226,30 @@ async def send_meeting_summary_email(
     msg.attach(MIMEText(plain_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    print(f"[Email] Email composed — subject=\"{subject}\", html={len(html_body)} bytes, plain={len(plain_body)} bytes")
-    print(f"[Email] Connecting to SMTP server {cfg['host']}:{cfg['port']}...")
+    print(f"[Email] Email composed — subject=\"{subject}\", html={len(html_body)} bytes, plain={len(plain_body)} bytes", flush=True)
+    print(f"[Email] Connecting to SMTP server {cfg['host']}:{cfg['port']}...", flush=True)
 
     try:
-        await aiosmtplib.send(
-            msg,
-            hostname=cfg["host"],
-            port=cfg["port"],
-            username=cfg["user"] or None,
-            password=cfg["password"] or None,
-            start_tls=cfg["use_tls"],
-            recipients=recipients,
+        await asyncio.wait_for(
+            aiosmtplib.send(
+                msg,
+                hostname=cfg["host"],
+                port=cfg["port"],
+                username=cfg["user"] or None,
+                password=cfg["password"] or None,
+                use_tls=cfg["use_tls"],
+                start_tls=cfg["start_tls"],
+                recipients=recipients,
+                timeout=30,
+            ),
+            timeout=45,
         )
         print(
             f"[Email] ✅ Summary for meeting {meeting_id} sent successfully to "
-            f"{len(recipients)} recipient(s): {', '.join(recipients)}"
+            f"{len(recipients)} recipient(s): {', '.join(recipients)}",
+            flush=True,
         )
+    except asyncio.TimeoutError:
+        print(f"[Email] ❌ Timed out connecting to SMTP server {cfg['host']}:{cfg['port']} for meeting {meeting_id}", flush=True)
     except Exception as exc:
-        print(f"[Email] ❌ Failed to send summary for meeting {meeting_id}: {type(exc).__name__}: {exc}")
-
+        print(f"[Email] ❌ Failed to send summary for meeting {meeting_id}: {type(exc).__name__}: {exc}", flush=True)
