@@ -635,19 +635,14 @@ class ControllerAgent:
         # Save today's findings into long-term memory
         if mem is not None and MEM0_SAVE_ENABLED:
             try:
-                await asyncio.to_thread(
-                    mem.add,
-                    f"Tech Lead findings: {report.get('tech_lead', '')}",
-                    user_id=mem0_user,
+                combined_report = (
+                    f"Tech Lead findings: {report.get('tech_lead', '')}\n"
+                    f"Product Manager findings: {report.get('product_manager', '')}\n"
+                    f"Scrum Master synthesis: {report.get('scrum_master', '')}"
                 )
                 await asyncio.to_thread(
                     mem.add,
-                    f"Product Manager findings: {report.get('product_manager', '')}",
-                    user_id=mem0_user,
-                )
-                await asyncio.to_thread(
-                    mem.add,
-                    f"Scrum Master synthesis: {report.get('scrum_master', '')}",
+                    combined_report,
                     user_id=mem0_user,
                 )
             except Exception as e:
