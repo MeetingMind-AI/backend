@@ -48,7 +48,12 @@ FINAL_REPORT_TECH_LEAD_PROMPT = (
     "Rules:\n"
     "1. Base your response strictly on the provided transcript. Do not invent details.\n"
     "2. If there are no items for a specific category, use an empty array [].\n"
-    "3. Do not add any keys beyond the ones specified above."
+    "3. Do not add any keys beyond the ones specified above.\n\n"
+    "STRICT GROUNDING RULES: You must rely EXCLUSIVELY on the provided transcript and "
+    "memory context. Do NOT invent, assume, or infer any details, names, dates, tools, "
+    "or decisions that are not explicitly stated. If information is missing, state "
+    "'Not discussed' or 'No information provided'. Fabricating information is strictly "
+    "prohibited."
 )
 
 FINAL_REPORT_PRODUCT_MANAGER_PROMPT = (
@@ -70,7 +75,12 @@ FINAL_REPORT_PRODUCT_MANAGER_PROMPT = (
     "Rules:\n"
     "1. Base your response strictly on the provided transcript. Do not invent details.\n"
     "2. If there are no items for a specific category, use an empty array [].\n"
-    "3. Do not add any keys beyond the ones specified above."
+    "3. Do not add any keys beyond the ones specified above.\n\n"
+    "STRICT GROUNDING RULES: You must rely EXCLUSIVELY on the provided transcript and "
+    "memory context. Do NOT invent, assume, or infer any details, names, dates, tools, "
+    "or decisions that are not explicitly stated. If information is missing, state "
+    "'Not discussed' or 'No information provided'. Fabricating information is strictly "
+    "prohibited."
 )
 
 FINAL_REPORT_SCRUM_MASTER_PROMPT = (
@@ -96,7 +106,12 @@ FINAL_REPORT_SCRUM_MASTER_PROMPT = (
     "1. Base your response strictly on the provided transcript. Do not invent details.\n"
     "2. Do not mention missing transcript text, model limitations, or speculative issues.\n"
     "3. Ensure the summary flows naturally and covers all major talking points.\n"
-    "4. If there are no items for a specific category, use an empty array []."
+    "4. If there are no items for a specific category, use an empty array [].\n\n"
+    "STRICT GROUNDING RULES: You must rely EXCLUSIVELY on the provided transcript and "
+    "memory context. Do NOT invent, assume, or infer any details, names, dates, tools, "
+    "or decisions that are not explicitly stated. If information is missing, state "
+    "'Not discussed' or 'No information provided'. Fabricating information is strictly "
+    "prohibited."
 )
 
 # Personas that produce initial independent analyses (Tech Lead + PM).
