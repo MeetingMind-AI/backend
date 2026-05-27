@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.auth import router as auth_router
@@ -26,6 +26,7 @@ from app.engine.vexa_client import (
     poll_transcripts_from_vexa,
     monitor_meeting_until_terminal,
     sync_final_transcript_from_vexa,
+    sync_speakers_from_vexa,
     update_meeting_status,
 )
 
@@ -33,6 +34,21 @@ from app.engine.vexa_client import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speakers JSONB"))
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'meetings' AND column_name = 'participants'
+                ) THEN
+                    UPDATE meetings SET speakers = participants WHERE speakers IS NULL AND participants IS NOT NULL;
+                    ALTER TABLE meetings DROP COLUMN participants;
+                END IF;
+            END $$;
+        """))
+        conn.commit()
     yield
 
 
@@ -274,6 +290,10 @@ async def _finalize_meeting(
             )
         except Exception as exc:
             print(f"[Leave] Transcript sync failed: {exc}")
+        try:
+            await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
+        except Exception as exc:
+            print(f"[Leave] Speaker sync failed: {exc}")
 
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
@@ -423,6 +443,7 @@ def list_meetings(
                 "team_id": m.team_id,
                 "created_at": m.created_at.isoformat() if m.created_at else None,
                 "topics": topics,
+                "speakers": m.speakers or [],
             })
         return {"meetings": result}
 
@@ -455,6 +476,7 @@ def get_meeting(
             "team_id": meeting.team_id,
             "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
             "topics": topics,
+            "speakers": meeting.speakers or [],
         }
 
 

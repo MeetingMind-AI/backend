@@ -23,6 +23,7 @@ VEXA_WS_URL = "ws://host.docker.internal:8056/ws"
 TERMINAL_MEETING_STATUSES = {"completed", "failed"}
 REALTIME_MIN_WORDS = 4
 FINALIZATION_PROGRESS_INTERVAL_SECONDS = 5
+SYSTEM_PARTICIPANT_NAMES = {"meeting audio"}
 
 _seen_chunk_sigs: dict[int, set[str]] = {}
 
@@ -253,6 +254,7 @@ async def _finalize_completed_meeting(
         print(
             f"[Vexa] Final transcript sync for meeting {meeting_id} upserted {upserted} chunks"
         )
+        await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
         await _generate_and_log_final_report(controller, meeting_id)
     finally:
         progress_done.set()
@@ -334,6 +336,67 @@ def update_meeting_status(meeting_id: int, status_value: str) -> None:
         except SQLAlchemyError as exc:
             db.rollback()
             print(f"[Vexa] Failed to update meeting status for {meeting_id}: {exc}")
+
+
+def _filter_speakers(raw: list[Any]) -> list[str]:
+    return [
+        name for p in raw
+        if (name := str(p).strip()) and name.lower() not in SYSTEM_PARTICIPANT_NAMES
+    ]
+
+
+async def sync_speakers_from_vexa(
+    meeting_id: int,
+    platform: str,
+    native_id: str,
+    api_key: str | None = None,
+) -> list[str]:
+    vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
+    if not vexa_api_key:
+        return []
+
+    base_url = _vexa_api_base_url()
+    delays = [2, 8, 20]
+
+    for attempt, delay in enumerate(delays, start=1):
+        await asyncio.sleep(delay)
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    f"{base_url}/meetings", headers={"X-API-Key": vexa_api_key}
+                )
+            response.raise_for_status()
+            payload: Any = response.json() if response.content else {}
+        except httpx.HTTPError as exc:
+            print(f"[Vexa] Speaker sync attempt {attempt} failed for meeting {meeting_id}: {exc}")
+            continue
+
+        remote_meeting = _extract_latest_remote_meeting(payload, platform, native_id)
+        if not remote_meeting:
+            print(f"[Vexa] Speaker sync attempt {attempt}: meeting {meeting_id} not found in Vexa yet")
+            continue
+
+        raw = remote_meeting.get("data", {}).get("participants", [])
+        speakers = _filter_speakers(raw if isinstance(raw, list) else [])
+
+        if not speakers:
+            print(f"[Vexa] Speaker sync attempt {attempt}: no speakers yet for meeting {meeting_id}")
+            continue
+
+        with SessionLocal() as db:
+            meeting = db.get(Meeting, meeting_id)
+            if meeting is not None:
+                meeting.speakers = speakers
+                try:
+                    db.commit()
+                    print(f"[Vexa] Synced {len(speakers)} speakers for meeting {meeting_id}: {speakers}")
+                except SQLAlchemyError as exc:
+                    db.rollback()
+                    print(f"[Vexa] Failed to persist speakers for meeting {meeting_id}: {exc}")
+        return speakers
+
+    print(f"[Vexa] Speaker sync exhausted all retries for meeting {meeting_id}")
+    return []
 
 
 async def sync_final_transcript_from_vexa(

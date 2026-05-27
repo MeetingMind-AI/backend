@@ -144,6 +144,7 @@ class Meeting(Base):
     )
     summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     discussion_log: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    speakers: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     team_id: Mapped[int | None] = mapped_column(
         ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True
     )
