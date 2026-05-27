@@ -123,13 +123,19 @@ All team endpoints require a valid session cookie. Members-only actions return `
   - Deploys a Vexa bot to join the meeting. Upserts the meeting record (re-uses existing row if `vexa_meeting_id` already exists). Schedules background tasks to poll transcripts and monitor the meeting lifecycle until completion. Returns `{"meeting_id": ...}`.
 
 - `POST /api/meetings/{meeting_id}/leave`
-  - Instructs the Vexa bot to leave the meeting via the Vexa bot DELETE API. Returns `{"ok": True}`.
+  - Instructs the Vexa bot to leave the meeting via the Vexa bot DELETE API.
+  - Returns `202 Accepted` and starts final transcript sync + final report generation in the background.
+  - Response example:
+    ```json
+    { "ok": true, "message": "Meeting finalization is running in the background." }
+    ```
 
 ### AI Explanations
 
 - `POST /api/meetings/{meeting_id}/explain`
   - Body: `{ "mode": "technical", "last_x_minutes": 2 }`
   - Generates an LLM-powered "instant clarity" explanation of recent transcript content. Supports `"technical"` or `"business"` personas. Filters by `last_x_minutes` if provided.
+  - Responses are cached in Redis for 60 seconds by hashed prompt (context + mode). When cached, the response returns immediately without a new LLM call.
   - Response:
     ```json
     {
