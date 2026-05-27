@@ -88,14 +88,20 @@ def _init_memory() -> Memory | None:
         os.getenv("MEM0_EMBED_MODEL", "nomic-embed-text").strip()
         or "nomic-embed-text"
     )
+    qdrant_url = os.getenv("MEM0_QDRANT_URL", "").strip()
+
+    qdrant_config = {
+        "collection_name": "meetingmind",
+        "embedding_model_dims": 768,
+    }
+    if qdrant_url:
+        qdrant_config["url"] = qdrant_url
+        qdrant_config["path"] = None
 
     config = {
         "vector_store": {
             "provider": "qdrant",
-            "config": {
-                "collection_name": "meetingmind",
-                "embedding_model_dims": 768,
-            }
+            "config": qdrant_config,
         },
         "llm": {
             "provider": "ollama",
@@ -121,7 +127,19 @@ def _init_memory() -> Memory | None:
         return None
 
 
-memory = _init_memory()
+_memory_instance: Memory | None = None
+_memory_initialized = False
+
+
+def get_memory() -> Memory | None:
+    """Lazy initialization to prevent module-level blocking."""
+    global _memory_instance, _memory_initialized
+    if not _memory_initialized:
+        _memory_instance = _init_memory()
+        _memory_initialized = True
+    return _memory_instance
+
+
 MEM0_SAVE_ENABLED = _env_bool("MEM0_SAVE_ENABLED", True)
 MEM0_SEARCH_ENABLED = _env_bool("MEM0_SEARCH_ENABLED", True)
 
@@ -386,15 +404,15 @@ class ControllerAgent:
 
     async def load_pre_meeting_context(self, team_id: int) -> None:
         """Fetches the team's recent history from Mem0 to use during the live meeting."""
-        global memory, MEM0_SEARCH_ENABLED
-        if memory is not None and MEM0_SEARCH_ENABLED:
+        mem = get_memory()
+        if mem is not None and MEM0_SEARCH_ENABLED:
             mem0_user = f"team_{team_id}"
             try:
                 print(
                     f"[ControllerAgent] Fetching pre-meeting context for {mem0_user}..."
                 )
                 raw_memories = await asyncio.to_thread(
-                    memory.search,
+                    mem.search,
                     query=(
                         "What are the current active projects, recent technical "
                         "decisions, and ongoing blockers for this team?"
@@ -546,10 +564,11 @@ class ControllerAgent:
         # Retrieve past context from the memory layer based on the current transcript
         query_text = transcript[:1000] if transcript else "General agile meeting"
         past_memories = ""
-        if memory is not None and MEM0_SEARCH_ENABLED:
+        mem = get_memory()
+        if mem is not None and MEM0_SEARCH_ENABLED:
             try:
                 past_memories = await asyncio.to_thread(
-                    memory.search, query=query_text, filters={"user_id": mem0_user}
+                    mem.search, query=query_text, filters={"user_id": mem0_user}
                 )
             except Exception as exc:
                 print(f"[Memory Error] Failed to search memories: {exc}")
@@ -607,20 +626,20 @@ class ControllerAgent:
         )
 
         # Save today's findings into long-term memory
-        if memory is not None and MEM0_SAVE_ENABLED:
+        if mem is not None and MEM0_SAVE_ENABLED:
             try:
                 await asyncio.to_thread(
-                    memory.add,
+                    mem.add,
                     f"Tech Lead findings: {report.get('tech_lead', '')}",
                     user_id=mem0_user,
                 )
                 await asyncio.to_thread(
-                    memory.add,
+                    mem.add,
                     f"Product Manager findings: {report.get('product_manager', '')}",
                     user_id=mem0_user,
                 )
                 await asyncio.to_thread(
-                    memory.add,
+                    mem.add,
                     f"Scrum Master synthesis: {report.get('scrum_master', '')}",
                     user_id=mem0_user,
                 )
