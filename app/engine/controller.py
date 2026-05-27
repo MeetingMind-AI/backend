@@ -95,8 +95,15 @@ def _init_memory() -> Memory | None:
         "embedding_model_dims": 768,
     }
     if qdrant_url:
-        qdrant_config["url"] = qdrant_url
-        qdrant_config["path"] = None
+        from urllib.parse import urlparse
+
+        parsed = urlparse(qdrant_url)
+        if parsed.hostname and parsed.port:
+            qdrant_config["host"] = parsed.hostname
+            qdrant_config["port"] = parsed.port
+        else:
+            qdrant_config["url"] = qdrant_url
+            qdrant_config["api_key"] = os.getenv("MEM0_QDRANT_API_KEY", "")
 
     config = {
         "vector_store": {
