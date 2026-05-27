@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import os
 
 import httpx
 from mem0 import Memory
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.models import Meeting, TranscriptChunk
 from app.engine.email_service import send_meeting_summary_email
@@ -22,6 +24,13 @@ from app.engine.prompts import (
     PROMPT_DEFAULTS,
     get_team_prompts,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+class DatabaseError(Exception):
+    """Custom exception for database persistence failures."""
 
 
 class _SafeFormat(dict):
@@ -117,18 +126,23 @@ class OllamaClient:
         self.model = os.getenv("OLLAMA_MODEL", "").strip() or model
         raw_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", timeout)
         self.timeout = raw_timeout if raw_timeout else 120.0
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.timeout))
 
-    async def generate(self, prompt: str, system_prompt: str) -> str:
+    async def generate(
+        self, prompt: str, system_prompt: str, json_mode: bool = False
+    ) -> str:
         payload = {
             "model": self.model,
             "prompt": prompt,
             "system": system_prompt,
             "stream": False,
         }
-        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout)) as client:
-            response = await client.post(self.url, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        if json_mode:
+            payload["format"] = "json"
+
+        response = await self._client.post(self.url, json=payload)
+        response.raise_for_status()
+        data = response.json()
 
         text = str(data.get("response", "")).strip()
         if not text:
@@ -620,5 +634,11 @@ class ControllerAgent:
 
         try:
             db.commit()
-        except Exception:
+        except SQLAlchemyError as exc:
             db.rollback()
+            logger.exception(
+                "Failed to persist final report for meeting %s", meeting_id
+            )
+            raise DatabaseError(
+                f"Database constraint or connection failure: {exc}"
+            ) from exc

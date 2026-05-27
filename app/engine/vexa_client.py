@@ -468,6 +468,7 @@ async def sync_final_transcript_from_vexa(
             delete(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id)
         )
 
+        new_chunks: list[TranscriptChunk] = []
         for segment in canonical_segments:
             text = str(segment.get("text", "")).strip()
             if not text:
@@ -480,7 +481,7 @@ async def sync_final_transcript_from_vexa(
             speaker = str(segment.get("speaker") or "Unknown").strip() or "Unknown"
             timestamp = _parse_absolute_start_time(absolute_start_time)
 
-            db.add(
+            new_chunks.append(
                 TranscriptChunk(
                     meeting_id=meeting_id,
                     speaker=speaker,
@@ -489,6 +490,9 @@ async def sync_final_transcript_from_vexa(
                 )
             )
             inserted_count += 1
+
+        if new_chunks:
+            db.add_all(new_chunks)
 
         try:
             db.commit()

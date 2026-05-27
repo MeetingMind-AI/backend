@@ -102,7 +102,6 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
                     timestamp=datetime.now(timezone.utc),
                 )
                 db.add(chunk)
-
                 try:
                     db.commit()
                     db.refresh(chunk)

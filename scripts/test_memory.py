@@ -43,6 +43,7 @@ async def main() -> None:
         agent = ControllerAgent()
         print("\n--- Testing Real-Time Notifications ---")
         start_time = datetime.now(timezone.utc)
+        chunk_buffer: list[TranscriptChunk] = []
         for index, line in enumerate(MOCK_TRANSCRIPT):
             speaker, text = _parse_transcript_line(line)
             if not text:
@@ -53,8 +54,7 @@ async def main() -> None:
                 text=text,
                 timestamp=start_time + timedelta(seconds=index * 10),
             )
-            db.add(chunk)
-            db.commit()
+            chunk_buffer.append(chunk)
 
             print(f"\n[Incoming] {speaker}: {text}")
             try:
@@ -88,6 +88,13 @@ async def main() -> None:
                     print("Notification skipped: proposal missing type/content.")
             else:
                 print("No notification generated.")
+
+        if chunk_buffer:
+            db.add_all(chunk_buffer)
+            db.commit()
+            print(
+                f"\n[Database] Batch inserted {len(chunk_buffer)} transcript chunks."
+            )
 
         print("\n--- Testing Final Report & Mem0 Save ---")
         print("Generating final report and triggering Mem0 save...")
