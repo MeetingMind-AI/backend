@@ -269,7 +269,9 @@ async def _generate_and_log_final_report(
 ) -> None:
     with SessionLocal() as db:
         try:
-            await controller.generate_final_report(meeting_id, db)
+            meeting = db.get(Meeting, meeting_id)
+            team_id = meeting.team_id if meeting else None
+            await controller.generate_final_report(meeting_id, db, team_id=team_id)
         except Exception as exc:  # noqa: BLE001
             print(
                 f"[Vexa] Failed to generate final report for meeting {meeting_id}: {type(exc).__name__}: {str(exc)}"
