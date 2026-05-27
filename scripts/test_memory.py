@@ -5,7 +5,7 @@ import uuid
 
 from app.db.session import SessionLocal
 from app.db.models import AgentAction, Meeting, TranscriptChunk
-from app.engine.controller import ControllerAgent, memory
+from app.engine.controller import ControllerAgent, get_memory
 
 
 MOCK_TRANSCRIPT = [
@@ -101,13 +101,14 @@ async def main() -> None:
         await agent.generate_final_report(meeting.id, db)
 
     print("\n--- Testing Mem0 Retrieval ---")
-    if memory is None:
+    mem = get_memory()
+    if mem is None:
         print("Error: Mem0 is not initialized. Check MEM0_ENABLED environment variable.")
         return
 
     query = "What was the decision about the message broker?"
     print(f"Querying Mem0: '{query}'")
-    results = memory.search(query=query, filters={"user_id": "team_1"})
+    results = mem.search(query=query, filters={"user_id": "team_1"})
     print("\nResults from Mem0:")
     print(json.dumps(results, indent=2))
 
