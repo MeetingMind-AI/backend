@@ -445,9 +445,8 @@ class ControllerAgent:
             try:
                 async with self._llm_semaphore:
                     raw = await self._llm.generate(
-                        prompt=prompt, system_prompt=sys_prompt
+                        prompt=prompt, system_prompt=sys_prompt, json_mode=True
                     )
-                raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
                 result = json.loads(raw)
                 summary = result.get("summary", "IGNORE")
                 proposal = result.get("proposal")
@@ -596,7 +595,9 @@ class ControllerAgent:
 
         # 5. Assemble and persist
         report = {**initial_reports, "scrum_master": scrum_master_result}
-        self._persist(db_session, meeting_id, report, discussion_log)
+        await asyncio.to_thread(
+            self._persist, db_session, meeting_id, report, discussion_log
+        )
 
         print(
             f"[Final Report] meeting={meeting_id}\n"
