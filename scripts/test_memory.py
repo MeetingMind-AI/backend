@@ -98,7 +98,7 @@ async def main() -> None:
 
         print("\n--- Testing Final Report & Mem0 Save ---")
         print("Generating final report and triggering Mem0 save...")
-        await agent.generate_final_report(meeting.id, db)
+        await agent.generate_final_report(meeting.id, db, team_id=meeting.team_id)
 
     print("\n--- Testing Mem0 Retrieval ---")
     mem = get_memory()
