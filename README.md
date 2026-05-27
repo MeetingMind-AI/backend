@@ -161,7 +161,8 @@ All team endpoints require a valid session cookie. Members-only actions return `
         "created_at": "2026-05-15T10:00:00+00:00",
         "topics": [
           { "id": 3, "name": "Backend", "color": "#4f8ef7" }
-        ]
+        ],
+        "speakers": ["Alice", "Bob"]
       }
     ]
   }
@@ -181,7 +182,8 @@ All team endpoints require a valid session cookie. Members-only actions return `
     "created_at": "2026-05-15T10:00:00+00:00",
     "topics": [
       { "id": 3, "name": "Backend", "color": "#4f8ef7" }
-    ]
+    ],
+    "speakers": ["Alice", "Bob"]
   }
   ```
   Returns `404` if not found.
@@ -333,6 +335,7 @@ Stores high-level metadata about meetings orchestrated by Vexa.
 | `status` | `String(64)` | `'pending'` | The meeting lifecycle status (e.g. `active`, `completed`). |
 | `summary` | `JSONB` | `NULL` | The generated final report from Ollama: dict with `tech_lead`, `product_manager`, and `scrum_master` keys. The `scrum_master` value is a JSON string with keys `summary`, `pending_to_schedule`, `parking_lot`, and `to_do`. |
 | `discussion_log` | `JSONB` | `NULL` | Reserved for storing a structured discussion log. |
+| `speakers` | `JSONB` | `NULL` | List of participant names synced from Vexa at meeting end (e.g. `["Alice", "Bob"]`). Populated by `sync_speakers_from_vexa` with a progressive retry (2 s → 8 s → 20 s). System entries like `"Meeting audio"` are filtered out. See `getting-meeting-info-from-vexa.md` for details. |
 | `team_id` | `Integer` | `NULL` | FK → `teams.id` (SET NULL on delete). Associates the meeting with a team. |
 | `created_by` | `Integer` | `NULL` | FK → `users.id` (SET NULL on delete). The user who dispatched the bot. |
 | `created_at` | `DateTime` | `now()` | Local timestamp of when the meeting record was created. |
@@ -419,6 +422,19 @@ Many-to-many association between meetings and topics.
 |--------|------|-------------|
 | `meeting_id` | `Integer` | FK → `meetings.id` (CASCADE delete). Part of composite PK. |
 | `topic_id` | `Integer` | FK → `topics.id` (CASCADE delete). Part of composite PK. |
+
+#### 10. `team_prompt_configs` Table
+Per-team overrides for the LLM prompts used during AI analysis. When a row exists for a given `(team_id, prompt_key)` pair, the backend uses `prompt_text` instead of the global default. Falls back to the hardcoded default when no override is present.
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `Integer` | Primary Key | |
+| `team_id` | `Integer` | Indexed | FK → `teams.id` (CASCADE delete). |
+| `prompt_key` | `String(64)` | | One of 8 known keys: `realtime_scrum_master`, `final_tech_lead`, `final_product_manager`, `discussion_tech_lead`, `discussion_product_manager`, `synthesis`, `instant_clarity_technical`, `instant_clarity_business`. |
+| `prompt_text` | `Text` | | The custom prompt text that replaces the global default for this team. |
+| `updated_at` | `DateTime` | `now()` | Updated automatically on each write. |
+
+Unique constraint on `(team_id, prompt_key)`.
 
 ## Running with Docker Compose
 
@@ -559,7 +575,8 @@ On meeting `completed`:
 
 1. Sync canonical transcript from Vexa REST API.
 2. Replace local transcript rows for that meeting with canonical ordered rows.
-3. Generate final structured JSON report using the Multi-Persona Architecture:
+3. Sync speakers from Vexa — calls `GET /meetings`, extracts `data.participants`, filters system entries, stores in `meetings.speakers`. Uses a progressive retry: 2 s → 8 s → 20 s, stopping as soon as a non-empty list is returned.
+4. Generate final structured JSON report using the Multi-Persona Architecture:
    - **Tech Lead** and **Product Manager** agents run in parallel to extract technical debt, blockers, and feature requests.
    - **Scrum Master (Lead Synthesizer)** runs next, receiving the findings from the Tech Lead and PM along with the raw transcript.
    - The Scrum Master synthesizes the results, resolves conflicting constraints, and outputs the final master JSON report containing `summary`, `pending_to_schedule`, `parking_lot`, and `to_do`.
