@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -275,7 +276,13 @@ async def leave_meeting(
     background_tasks.add_task(
         _finalize_meeting, meeting_id, platform or "", native_id or "", vexa_api_key
     )
-    return {"ok": True}
+    return JSONResponse(
+        status_code=202,
+        content={
+            "ok": True,
+            "message": "Meeting finalization is running in the background.",
+        },
+    )
 
 
 async def _finalize_meeting(

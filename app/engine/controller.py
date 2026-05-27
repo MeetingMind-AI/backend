@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 import os
 
 import httpx
 from mem0 import Memory
+import redis.asyncio as redis
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -27,10 +29,21 @@ from app.engine.prompts import (
 
 
 logger = logging.getLogger(__name__)
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+_redis_client: redis.Redis | None = None
 
 
 class DatabaseError(Exception):
     """Custom exception for database persistence failures."""
+
+
+def _get_redis_client() -> redis.Redis | None:
+    global _redis_client
+    if not REDIS_URL:
+        return None
+    if _redis_client is None:
+        _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    return _redis_client
 
 
 class _SafeFormat(dict):
@@ -478,11 +491,35 @@ class ControllerAgent:
         prompt = prompts["instant_clarity_user"].format_map(
             _SafeFormat(transcript_context=transcript_context)
         )
+        cache_key = ""
+        cache_client = _get_redis_client()
+        if cache_client is not None:
+            cache_payload = f"{system_prompt}\n{prompt}"
+            hashed_prompt = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
+            cache_key = f"instant_clarity:{hashed_prompt}"
+            try:
+                cached = await cache_client.get(cache_key)
+            except Exception as exc:
+                cached = None
+                print(f"[ControllerAgent] Redis cache read failed: {exc}")
+            if cached:
+                return cached
+
         try:
-            return await self._llm.generate(prompt=prompt, system_prompt=system_prompt)
+            explanation = await self._llm.generate(
+                prompt=prompt, system_prompt=system_prompt
+            )
         except Exception as exc:
             print(f"[ControllerAgent] Instant Clarity failed: {exc}")
             return "Failed to generate instant clarity due to an internal error."
+
+        if cache_client is not None and cache_key:
+            try:
+                await cache_client.setex(cache_key, 60, explanation)
+            except Exception as exc:
+                print(f"[ControllerAgent] Redis cache write failed: {exc}")
+
+        return explanation
 
     # -- Final report ------------------------------------------------------
 
