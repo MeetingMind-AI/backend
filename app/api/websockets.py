@@ -20,13 +20,15 @@ router = APIRouter()
 async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
     await manager.connect(meeting_id, websocket)
     controller = ControllerAgent()
-    controller.load_pre_meeting_context(team_id="team_agile")
 
     # Resolve team prompts once per connection (cached for the duration of the meeting)
     with SessionLocal() as db:
         _meeting = db.get(Meeting, meeting_id)
         _team_id = _meeting.team_id if _meeting else None
         team_prompts = get_team_prompts(_team_id, db)
+
+    if _team_id is not None:
+        controller.load_pre_meeting_context(team_id=_team_id)
 
     try:
         # Send full transcript snapshot on connect

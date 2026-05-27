@@ -356,20 +356,21 @@ class ControllerAgent:
         self._discussion = DiscussionEngine(self._llm)
         self._pre_meeting_context = ""
 
-    def load_pre_meeting_context(self, team_id: str = "team_agile") -> None:
+    def load_pre_meeting_context(self, team_id: int) -> None:
         """Fetches the team's recent history from Mem0 to use during the live meeting."""
         global memory, MEM0_SEARCH_ENABLED
         if memory is not None and MEM0_SEARCH_ENABLED:
+            mem0_user = f"team_{team_id}"
             try:
                 print(
-                    f"[ControllerAgent] Fetching pre-meeting context for {team_id}..."
+                    f"[ControllerAgent] Fetching pre-meeting context for {mem0_user}..."
                 )
                 raw_memories = memory.search(
                     query=(
                         "What are the current active projects, recent technical "
                         "decisions, and ongoing blockers for this team?"
                     ),
-                    filters={"user_id": team_id},
+                    filters={"user_id": mem0_user},
                 )
                 if (
                     raw_memories
@@ -482,13 +483,16 @@ class ControllerAgent:
         # 1. Load transcript
         transcript = TranscriptLoader.load(meeting_id, db_session)
 
+        # Determine the Mem0 partition string
+        mem0_user = f"team_{team_id}" if team_id else "global_team"
+
         # Retrieve past context from the memory layer based on the current transcript
         query_text = transcript[:1000] if transcript else "General agile meeting"
         past_memories = ""
         if memory is not None and MEM0_SEARCH_ENABLED:
             try:
                 past_memories = memory.search(
-                    query=query_text, filters={"user_id": "team_agile"}
+                    query=query_text, filters={"user_id": mem0_user}
                 )
             except Exception as exc:
                 print(f"[Memory Error] Failed to search memories: {exc}")
@@ -548,15 +552,15 @@ class ControllerAgent:
             try:
                 memory.add(
                     f"Tech Lead findings: {report.get('tech_lead', '')}",
-                    user_id="team_agile",
+                    user_id=mem0_user,
                 )
                 memory.add(
                     f"Product Manager findings: {report.get('product_manager', '')}",
-                    user_id="team_agile",
+                    user_id=mem0_user,
                 )
                 memory.add(
                     f"Scrum Master synthesis: {report.get('scrum_master', '')}",
-                    user_id="team_agile",
+                    user_id=mem0_user,
                 )
             except Exception as e:
                 print(f"[Memory Error] Failed to save memories to Mem0: {e}")

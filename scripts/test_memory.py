@@ -33,6 +33,7 @@ async def main() -> None:
             title="Memory Test Meeting",
             status="completed",
             vexa_meeting_id=f"mock-vexa-{uuid.uuid4()}",
+            team_id=1,
         )
         db.add(meeting)
         db.commit()
@@ -99,7 +100,7 @@ async def main() -> None:
 
     query = "What was the decision about the message broker?"
     print(f"Querying Mem0: '{query}'")
-    results = memory.search(query=query, filters={"user_id": "team_agile"})
+    results = memory.search(query=query, filters={"user_id": "team_1"})
     print("\nResults from Mem0:")
     print(json.dumps(results, indent=2))
 
