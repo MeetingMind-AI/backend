@@ -367,10 +367,11 @@ class ControllerAgent:
         timeout: float = 30.0,
     ) -> None:
         self._llm = OllamaClient(url=ollama_url, model=model, timeout=timeout)
+        self._llm_semaphore = asyncio.Semaphore(1)
         self._discussion = DiscussionEngine(self._llm)
         self._pre_meeting_context = ""
 
-    def load_pre_meeting_context(self, team_id: int) -> None:
+    async def load_pre_meeting_context(self, team_id: int) -> None:
         """Fetches the team's recent history from Mem0 to use during the live meeting."""
         global memory, MEM0_SEARCH_ENABLED
         if memory is not None and MEM0_SEARCH_ENABLED:
@@ -379,7 +380,8 @@ class ControllerAgent:
                 print(
                     f"[ControllerAgent] Fetching pre-meeting context for {mem0_user}..."
                 )
-                raw_memories = memory.search(
+                raw_memories = await asyncio.to_thread(
+                    memory.search,
                     query=(
                         "What are the current active projects, recent technical "
                         "decisions, and ongoing blockers for this team?"
@@ -428,7 +430,10 @@ class ControllerAgent:
 
         async def _run(role: str, sys_prompt: str) -> tuple[str, dict]:
             try:
-                raw = await self._llm.generate(prompt=prompt, system_prompt=sys_prompt)
+                async with self._llm_semaphore:
+                    raw = await self._llm.generate(
+                        prompt=prompt, system_prompt=sys_prompt
+                    )
                 raw = raw.strip().removeprefix("```json").removesuffix("```").strip()
                 result = json.loads(raw)
                 summary = result.get("summary", "IGNORE")
@@ -453,8 +458,8 @@ class ControllerAgent:
         last_x_minutes: int | None = None,
         team_id: int | None = None,
     ) -> str:
-        transcript_context = TranscriptLoader.load_recent(
-            meeting_id, db_session, last_x_minutes
+        transcript_context = await asyncio.to_thread(
+            TranscriptLoader.load_recent, meeting_id, db_session, last_x_minutes
         )
         if not transcript_context:
             return "No transcript data available for this meeting to explain."
@@ -495,7 +500,9 @@ class ControllerAgent:
         prompts = get_team_prompts(team_id, db_session)
 
         # 1. Load transcript
-        transcript = TranscriptLoader.load(meeting_id, db_session)
+        transcript = await asyncio.to_thread(
+            TranscriptLoader.load, meeting_id, db_session
+        )
 
         # Determine the Mem0 partition string
         mem0_user = f"team_{team_id}" if team_id else "global_team"
@@ -505,8 +512,8 @@ class ControllerAgent:
         past_memories = ""
         if memory is not None and MEM0_SEARCH_ENABLED:
             try:
-                past_memories = memory.search(
-                    query=query_text, filters={"user_id": mem0_user}
+                past_memories = await asyncio.to_thread(
+                    memory.search, query=query_text, filters={"user_id": mem0_user}
                 )
             except Exception as exc:
                 print(f"[Memory Error] Failed to search memories: {exc}")
@@ -564,15 +571,18 @@ class ControllerAgent:
         # Save today's findings into long-term memory
         if memory is not None and MEM0_SAVE_ENABLED:
             try:
-                memory.add(
+                await asyncio.to_thread(
+                    memory.add,
                     f"Tech Lead findings: {report.get('tech_lead', '')}",
                     user_id=mem0_user,
                 )
-                memory.add(
+                await asyncio.to_thread(
+                    memory.add,
                     f"Product Manager findings: {report.get('product_manager', '')}",
                     user_id=mem0_user,
                 )
-                memory.add(
+                await asyncio.to_thread(
+                    memory.add,
                     f"Scrum Master synthesis: {report.get('scrum_master', '')}",
                     user_id=mem0_user,
                 )

@@ -28,7 +28,7 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
         team_prompts = get_team_prompts(_team_id, db)
 
     if _team_id is not None:
-        controller.load_pre_meeting_context(team_id=_team_id)
+        await controller.load_pre_meeting_context(team_id=_team_id)
 
     try:
         # Send full transcript snapshot on connect
