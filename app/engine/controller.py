@@ -174,6 +174,11 @@ class OllamaClient:
             "prompt": prompt,
             "system": system_prompt,
             "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "top_p": 0.1,
+                "seed": 42,
+            },
         }
         if json_mode:
             payload["format"] = "json"
@@ -449,7 +454,12 @@ class ControllerAgent:
 
     # -- Real-time summarisation + proposal detection --------------------
 
-    async def summarize(self, text: str, team_prompts: dict[str, str] | None = None) -> dict[str, dict]:
+    async def summarize(
+        self,
+        text: str,
+        existing_actions: list[str] | None = None,
+        team_prompts: dict[str, str] | None = None,
+    ) -> dict[str, dict]:
         cleaned = " ".join(text.split()).strip()
         if not cleaned:
             return {
@@ -457,9 +467,20 @@ class ControllerAgent:
                 for role in REALTIME_PERSONA_PROMPTS
             }
 
+        action_context = ""
+        if existing_actions:
+            action_context = (
+                "\n--- CURRENTLY TRACKED ACTIONS ---\n"
+                + "\n".join(f"- {action}" for action in existing_actions)
+                + "\nCRITICAL: Do NOT extract any action that semantically matches the tracked actions above."
+            )
+
         user_template = (team_prompts or {}).get("realtime_user") or PROMPT_DEFAULTS["realtime_user"]
         prompt = user_template.format_map(
-            _SafeFormat(transcript=cleaned, pre_meeting_context=self._pre_meeting_context)
+            _SafeFormat(
+                transcript=cleaned,
+                pre_meeting_context=self._pre_meeting_context + action_context,
+            )
         )
 
         persona_prompts = {

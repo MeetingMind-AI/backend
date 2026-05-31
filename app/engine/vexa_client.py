@@ -18,10 +18,11 @@ from app.api.ws_manager import ConnectionManager
 from app.db.models import AgentAction, Meeting, TranscriptChunk
 from app.db.session import SessionLocal
 from app.engine.controller import ControllerAgent
+from app.engine.prompts import get_team_prompts
 
 VEXA_WS_URL = "ws://host.docker.internal:8056/ws"
 TERMINAL_MEETING_STATUSES = {"completed", "failed"}
-REALTIME_MIN_WORDS = 4
+REALTIME_MIN_WORDS = 15
 FINALIZATION_PROGRESS_INTERVAL_SECONDS = 5
 SYSTEM_PARTICIPANT_NAMES = {"meeting audio"}
 
@@ -589,6 +590,11 @@ async def poll_transcripts_from_vexa(
 
     controller = ControllerAgent()
     _seen_chunk_sigs[meeting_id] = _get_chunk_sigs(meeting_id)
+    team_prompts = None
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        team_id = meeting.team_id if meeting else None
+        team_prompts = get_team_prompts(team_id, db)
 
     while not _is_local_meeting_terminal(meeting_id):
         try:
@@ -638,7 +644,22 @@ async def poll_transcripts_from_vexa(
                             )
 
                         try:
-                            result = await controller.summarize(c.text)
+                            with SessionLocal() as db:
+                                pending_rows = (
+                                    db.execute(
+                                        select(AgentAction.content).where(
+                                            AgentAction.meeting_id == meeting_id,
+                                            AgentAction.status == "pending",
+                                        )
+                                    )
+                                    .scalars()
+                                    .all()
+                                )
+                            result = await controller.summarize(
+                                c.text,
+                                existing_actions=pending_rows,
+                                team_prompts=team_prompts,
+                            )
                             scrum = result.get("scrum_master", {})
                             summary_text = scrum.get("text", "IGNORE")
                             if (

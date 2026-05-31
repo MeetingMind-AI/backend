@@ -130,7 +130,22 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
             )
 
             try:
-                result = await controller.summarize(text, team_prompts=team_prompts)
+                with SessionLocal() as db:
+                    pending_rows = (
+                        db.execute(
+                            select(AgentAction.content).where(
+                                AgentAction.meeting_id == meeting_id,
+                                AgentAction.status == "pending",
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                result = await controller.summarize(
+                    text,
+                    existing_actions=pending_rows,
+                    team_prompts=team_prompts,
+                )
                 print(f"[Ollama Result] {speaker}: {result}")
             except Exception as exc:
                 print(f"Ollama Error: {exc}")
