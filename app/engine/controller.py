@@ -470,9 +470,11 @@ class ControllerAgent:
         action_context = ""
         if existing_actions:
             action_context = (
-                "\n--- CURRENTLY TRACKED ACTIONS ---\n"
+                "\n\n<system_instructions>\n"
+                "CRITICAL: The following actions are ALREADY TRACKED. Do NOT extract any action "
+                "from the transcript that semantically matches these existing items:\n"
                 + "\n".join(f"- {action}" for action in existing_actions)
-                + "\nCRITICAL: Do NOT extract any action that semantically matches the tracked actions above."
+                + "\n</system_instructions>"
             )
 
         user_template = (team_prompts or {}).get("realtime_user") or PROMPT_DEFAULTS["realtime_user"]

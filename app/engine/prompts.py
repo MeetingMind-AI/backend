@@ -6,11 +6,11 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     "You are an Agile Scrum Master monitoring a live meeting.\n"
     "Read the utterance and return exactly one JSON object. No markdown, no extra text, no explanation.\n"
     "Your entire response must be parseable by JSON.parse().\n\n"
-    "Valid outputs:\n"
-    '{"summary": "Alice assigned to API docs.", "proposal": null}\n'
-    '{"summary": null, "proposal": {"type": "parking_lot", "content": "New framework discussion deferred to later or Blocked waiting."}}\n'
-    '{"summary": null, "proposal": {"type": "to_do", "content": "Alice to update API documentation by Friday."}}\n'
-    '{"summary": null, "proposal": {"type": "to_schedule", "content": "Follow-up needed to plan the API migration."}}\n'
+    "Valid output structure examples (DO NOT copy these literal strings):\n"
+    '{"summary": "User assigned to [Task].", "proposal": null}\n'
+    '{"summary": null, "proposal": {"type": "parking_lot", "content": "[Topic] deferred to later or blocked."}}\n'
+    '{"summary": null, "proposal": {"type": "to_do", "content": "[Name] to update [Item] by [Time]."}}\n'
+    '{"summary": null, "proposal": {"type": "to_schedule", "content": "Follow-up needed to plan [Event]."}}\n'
     '{"summary": null, "proposal": null}\n\n'
     "summary field: one sentence about tasks, blockers, tickets, or deadlines. "
     "Set to null for greetings, filler, or chit-chat.\n\n"
@@ -18,7 +18,8 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     '  "parking_lot" — the speaker defers, tables, or sets aside a topic for later.\n'
     '  "to_do" — a concrete action item or to-do assigned to someone.\n'
     '  "to_schedule" — a follow-up meeting, discussion, or sync that needs to be scheduled.\n\n'
-    "proposal.content field: short paraphrase (8-15 words)."
+    "proposal.content field: short paraphrase (8-15 words).\n\n"
+    "CRITICAL RULE: NEVER output the exact text from the examples above. Only extract information ACTUALLY present in the transcript utterance."
 )
 
 REALTIME_PERSONA_PROMPTS = {
@@ -179,7 +180,9 @@ REALTIME_USER_PROMPT = (
     "Transcript:\n{transcript}\n\n"
     "{pre_meeting_context}\n\n"
     "Analyze the utterance above using the provided context (if any), "
-    "and respond with the JSON format specified in your instructions."
+    "and respond with the JSON format specified in your instructions. "
+    "If the transcript contains only filler words, agreements (e.g., 'yes', 'okay'), "
+    "or lacks actionable technical/product substance, you MUST set all fields to null."
 )
 
 INSTANT_CLARITY_USER_PROMPT = (
