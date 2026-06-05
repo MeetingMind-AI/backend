@@ -721,6 +721,15 @@ class ControllerAgent:
             return
 
         meeting.summary = report
+
+        # Extract the AI-generated title and overwrite the raw meeting ID
+        try:
+            sm_data = json.loads(report.get("scrum_master", "{}"))
+            new_title = sm_data.get("title")
+            if new_title and isinstance(new_title, str):
+                meeting.title = new_title.strip()
+        except Exception as exc:
+            print(f"[_persist] Could not parse title from Scrum Master report: {exc}")
         if discussion_log and hasattr(meeting, "discussion_log"):
             meeting.discussion_log = discussion_log
 

@@ -92,6 +92,7 @@ FINAL_REPORT_SCRUM_MASTER_PROMPT = (
     "Output ONLY valid JSON without any markdown formatting or explanation.\n"
     "The JSON must have exactly this structure:\n"
     "{\n"
+    '  "title": "A short, concise, and descriptive title for this meeting (e.g., Q3 Roadmap Planning, API Refactor Sync). Max 6 words.",\n'
     '  "summary": "Provide a clear and thorough summary of the meeting, focusing on the main topics discussed, key goals, decisions made, and overall progress.",\n'
     '  "pending_to_schedule": [\n'
     '    {"task": "Description of any item, follow-up meeting, or discussion that needs to be scheduled", "owner": "Name of the person responsible, or null if unassigned"}\n'
