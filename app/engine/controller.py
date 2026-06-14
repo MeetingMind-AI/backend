@@ -158,19 +158,29 @@ class OllamaClient:
         self,
         url: str = "http://ollama:11434/api/generate",
         model: str = "llama3",
+        final_model: str | None = None,
         timeout: float = 30.0,
     ) -> None:
         self.url = os.getenv("OLLAMA_URL", "").strip() or url
         self.model = os.getenv("OLLAMA_MODEL", "").strip() or model
+        self.final_model = (
+            final_model
+            or os.getenv("OLLAMA_FINAL_MODEL", "qwen3.6:14b").strip()
+            or "qwen3.6:14b"
+        )
         raw_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", timeout)
         self.timeout = raw_timeout if raw_timeout else 120.0
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.timeout))
 
     async def generate(
-        self, prompt: str, system_prompt: str, json_mode: bool = False
+        self,
+        prompt: str,
+        system_prompt: str,
+        json_mode: bool = False,
+        model: str | None = None,
     ) -> str:
         payload = {
-            "model": self.model,
+            "model": model or self.model,
             "prompt": prompt,
             "system": system_prompt,
             "stream": False,
@@ -211,6 +221,7 @@ class DiscussionEngine:
         transcript: str,
         num_rounds: int,
         team_prompts: dict[str, str] | None = None,
+        model: str | None = None,
     ) -> list[dict[str, str]]:
         """Execute *num_rounds* of Tech Lead ↔ PM discussion."""
         log: list[dict[str, str]] = []
@@ -231,7 +242,7 @@ class DiscussionEngine:
             )
 
             tasks = [
-                self._discuss(role, prompt, context, meeting_id, round_num)
+                self._discuss(role, prompt, context, meeting_id, round_num, model)
                 for role, prompt in resolved_personas.items()
             ]
             results = await asyncio.gather(*tasks)
@@ -258,9 +269,14 @@ class DiscussionEngine:
         context: str,
         meeting_id: int,
         round_num: int,
+        model: str | None = None,
     ) -> tuple[str, str]:
         try:
-            result = await self._llm.generate(prompt=context, system_prompt=sys_prompt)
+            result = await self._llm.generate(
+                prompt=context,
+                system_prompt=sys_prompt,
+                model=model,
+            )
             return role, result
         except Exception as exc:
             print(f"[Discussion] {role} failed in round {round_num}: {exc}")
@@ -407,9 +423,15 @@ class ControllerAgent:
         self,
         ollama_url: str = "http://ollama:11434/api/generate",
         model: str = "llama3",
+        final_model: str | None = None,
         timeout: float = 30.0,
     ) -> None:
-        self._llm = OllamaClient(url=ollama_url, model=model, timeout=timeout)
+        self._llm = OllamaClient(
+            url=ollama_url,
+            model=model,
+            final_model=final_model,
+            timeout=timeout,
+        )
         self._llm_semaphore = asyncio.Semaphore(1)
         self._discussion = DiscussionEngine(self._llm)
         self._pre_meeting_context = ""
@@ -493,7 +515,10 @@ class ControllerAgent:
             try:
                 async with self._llm_semaphore:
                     raw = await self._llm.generate(
-                        prompt=prompt, system_prompt=sys_prompt, json_mode=True
+                        prompt=prompt,
+                        system_prompt=sys_prompt,
+                        json_mode=True,
+                        model=self._llm.model,
                     )
                 result = json.loads(raw)
                 summary = result.get("summary", "IGNORE")
@@ -554,7 +579,9 @@ class ControllerAgent:
 
         try:
             explanation = await self._llm.generate(
-                prompt=prompt, system_prompt=system_prompt
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=self._llm.model,
             )
         except Exception as exc:
             print(f"[ControllerAgent] Instant Clarity failed: {exc}")
@@ -628,6 +655,7 @@ class ControllerAgent:
                 transcript=transcript,
                 num_rounds=num_rounds,
                 team_prompts=prompts,
+                model=self._llm.final_model,
             )
 
         # 4. Scrum Master synthesis
@@ -640,6 +668,7 @@ class ControllerAgent:
         scrum_master_result = await self._llm.generate(
             prompt=synthesis_prompt,
             system_prompt=prompts["synthesis"],
+            model=self._llm.final_model,
         )
 
         # 5. Assemble and persist
@@ -698,7 +727,9 @@ class ControllerAgent:
         async def _fetch(role: str, sys_prompt: str) -> tuple[str, str]:
             try:
                 return role, await self._llm.generate(
-                    prompt=prompt, system_prompt=sys_prompt
+                    prompt=prompt,
+                    system_prompt=sys_prompt,
+                    model=self._llm.final_model,
                 )
             except Exception as exc:
                 print(f"[Final Report] Persona {role} failed: {exc}")
