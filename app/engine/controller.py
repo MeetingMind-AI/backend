@@ -165,8 +165,8 @@ class OllamaClient:
         self.model = os.getenv("OLLAMA_MODEL", "").strip() or model
         self.final_model = (
             final_model
-            or os.getenv("OLLAMA_FINAL_MODEL", "qwen3.6:14b").strip()
-            or "qwen3.6:14b"
+            or os.getenv("OLLAMA_FINAL_MODEL", "qwen2.5:14b").strip()
+            or "qwen2.5:14b"
         )
         raw_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", timeout)
         self.timeout = raw_timeout if raw_timeout else 120.0
