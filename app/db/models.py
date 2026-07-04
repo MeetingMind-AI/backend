@@ -198,6 +198,11 @@ class AgentAction(Base):
         nullable=False,
         index=True,
     )
+    assignee_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     agent_role: Mapped[str] = mapped_column(String(120), nullable=False)
     action_type: Mapped[str] = mapped_column(String(120), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
@@ -206,6 +211,7 @@ class AgentAction(Base):
     )
 
     meeting: Mapped[Meeting] = relationship(back_populates="agent_actions")
+    assignee: Mapped["User"] = relationship(foreign_keys=[assignee_id])
 
 
 class Topic(Base):

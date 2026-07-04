@@ -19,7 +19,7 @@ from app.api.teams import router as teams_router
 from app.api.websockets import router as websocket_router
 from app.api.ws_manager import manager
 from app.db.base import Base
-from app.db.models import AgentAction, Meeting, Session, TeamMembership, TranscriptChunk, meeting_topics
+from app.db.models import AgentAction, Meeting, Session, TeamMembership, TranscriptChunk, meeting_topics, User
 from app.db.session import SessionLocal, engine
 from app.engine.controller import ControllerAgent
 from app.engine.vexa_client import (
@@ -572,8 +572,9 @@ def list_all_actions(
         if team_id is not None:
             _assert_member(db, user_id, team_id)
         stmt = (
-            select(AgentAction, Meeting.title, Meeting.created_at)
+            select(AgentAction, Meeting.title, Meeting.created_at, User)
             .join(Meeting, AgentAction.meeting_id == Meeting.id)
+            .outerjoin(User, AgentAction.assignee_id == User.id)
             .order_by(AgentAction.id.desc())
         )
         if team_id is not None:
@@ -586,7 +587,7 @@ def list_all_actions(
             "to_do": {"pending": [], "accepted": [], "rejected": []},
             "to_schedule": {"pending": [], "accepted": [], "rejected": []},
         }
-        for a, m_title, m_created in rows:
+        for a, m_title, m_created, u in rows:
             if a.action_type not in grouped:
                 continue
             entry = {
@@ -598,6 +599,11 @@ def list_all_actions(
                 "action_type": a.action_type,
                 "content": a.content,
                 "status": a.status,
+                "assignee": {
+                    "id": u.id,
+                    "name": u.name,
+                    "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None
+                } if u else None
             }
             bucket = "accepted" if a.status == "accepted" else ("rejected" if a.status == "rejected" else "pending")
             grouped[a.action_type][bucket].append(entry)
@@ -616,17 +622,18 @@ def list_actions(
         if meeting.team_id:
             _assert_member(db, user_id, meeting.team_id)
         rows = db.execute(
-            select(AgentAction)
+            select(AgentAction, User)
+            .outerjoin(User, AgentAction.assignee_id == User.id)
             .where(AgentAction.meeting_id == meeting_id)
             .order_by(AgentAction.id.desc())
-        ).scalars().all()
+        ).all()
 
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
             "parking_lot": {"pending": [], "accepted": [], "rejected": []},
             "to_do": {"pending": [], "accepted": [], "rejected": []},
             "to_schedule": {"pending": [], "accepted": [], "rejected": []},
         }
-        for a in rows:
+        for a, u in rows:
             t = (
                 a.action_type
                 if a.action_type not in ("blocker", "conflict")
@@ -640,6 +647,11 @@ def list_actions(
                 "action_type": t,
                 "content": a.content,
                 "status": a.status,
+                "assignee": {
+                    "id": u.id,
+                    "name": u.name,
+                    "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None
+                } if u else None
             }
             bucket = "accepted" if a.status == "accepted" else ("rejected" if a.status == "rejected" else "pending")
             grouped[t][bucket].append(entry)
@@ -649,6 +661,8 @@ def list_actions(
 class ActionReviewRequest(BaseModel):
     status: str | None = Field(default=None, pattern="^(accepted|rejected|pending)$")
     content: str | None = None
+    assignee_id: int | None = None
+    action_type: str | None = Field(default=None, pattern="^(parking_lot|to_do|to_schedule)$")
 
 
 @app.patch("/api/meetings/{meeting_id}/actions/{action_id}")
@@ -667,10 +681,15 @@ def review_action(
         action = db.get(AgentAction, action_id)
         if not action or action.meeting_id != meeting_id:
             raise HTTPException(status_code=404, detail="Action not found")
-        if request.status is not None:
-            action.status = request.status
-        if request.content is not None:
-            action.content = request.content
+        update_data = request.model_dump(exclude_unset=True)
+        if "status" in update_data:
+            action.status = update_data["status"]
+        if "content" in update_data:
+            action.content = update_data["content"]
+        if "assignee_id" in update_data:
+            action.assignee_id = update_data["assignee_id"]
+        if "action_type" in update_data:
+            action.action_type = update_data["action_type"]
         try:
             db.commit()
             db.refresh(action)
@@ -682,6 +701,59 @@ def review_action(
         status = action.status
         content = action.content
     return {"ok": True, "id": action_id, "status": status, "content": content}
+
+
+class ActionCreateRequest(BaseModel):
+    action_type: str = Field(pattern="^(parking_lot|to_do|to_schedule)$")
+    content: str
+    assignee_id: int | None = None
+
+@app.post("/api/meetings/{meeting_id}/actions")
+def create_action(
+    meeting_id: int,
+    request: ActionCreateRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+        
+        action = AgentAction(
+            meeting_id=meeting_id,
+            agent_role="manual",
+            action_type=request.action_type,
+            content=request.content,
+            assignee_id=request.assignee_id,
+            status="pending"
+        )
+        db.add(action)
+        try:
+            db.commit()
+            db.refresh(action)
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to create action: {exc}") from exc
+            
+        u = None
+        if action.assignee_id:
+            u = db.get(User, action.assignee_id)
+            
+        return {
+            "ok": True,
+            "id": action.id,
+            "agent_role": action.agent_role,
+            "action_type": action.action_type,
+            "content": action.content,
+            "status": action.status,
+            "assignee": {
+                "id": u.id,
+                "name": u.name,
+                "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None
+            } if u else None
+        }
 
 
 @app.get("/health", tags=["health"])
