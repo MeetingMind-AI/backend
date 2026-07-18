@@ -27,7 +27,7 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     '          "additionalProperties": false,\n'
     '          "required": ["type", "content"],\n'
     '          "properties": {\n'
-    '            "type": {"enum": ["parking_lot", "to_do", "to_schedule"]},\n'
+    '            "type": {"enum": ["parking_lot", "to_do", "to_schedule", "blocker"]},\n'
     '            "content": {"type": "string"}\n'
     "          }\n"
     "        }\n"
@@ -37,8 +37,9 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     "}\n"
     "</json_schema_enforcement>\n\n"
     "Interpretation guidance: summary is one sentence describing the utterance's key task, blocker, ticket, or deadline. "
-    "If the utterance is greeting/filler/chit-chat, set summary to 'IGNORE' and set proposal to null."
-    "If actionable, set proposal.type to parking_lot, to_do, or to_schedule with a short paraphrased content string grounded only in the utterance."
+    "If the utterance is greeting/filler/chit-chat, set summary to 'IGNORE' and set proposal to null. "
+    "If actionable, set proposal.type to parking_lot, to_do, to_schedule, or blocker with a short paraphrased content string grounded only in the utterance. "
+    "Use 'blocker' when you detect that the conversation is not moving, the team is talking in circles, or a clear blocker is stated."
 )
 
 REALTIME_PERSONA_PROMPTS = {
