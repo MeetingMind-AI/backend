@@ -39,12 +39,14 @@ def _assert_owner(db, user_id: int, team_id: int) -> Team:
     return team
 
 
-def _member_out(user: User) -> dict[str, Any]:
+def _member_out(user: User, membership: TeamMembership) -> dict[str, Any]:
     return {
         "id": user.id,
         "name": user.name,
         "email": user.email,
         "photo_url": f"/api/auth/photo/{user.id}" if user.photo else None,
+        "role": membership.role,
+        "notification_tags": membership.notification_tags or [],
     }
 
 
@@ -135,7 +137,7 @@ def get_team(
         for m in memberships:
             u = db.get(User, m.user_id)
             if u:
-                members.append({**_member_out(u), "is_owner": u.id == team.owner_id})
+                members.append({**_member_out(u, m), "is_owner": u.id == team.owner_id})
 
         topics = db.execute(
             select(Topic).where(Topic.team_id == team_id)
@@ -249,7 +251,7 @@ def list_members(
             u = db.get(User, m.user_id)
             if u:
                 members.append({
-                    **_member_out(u),
+                    **_member_out(u, m),
                     "is_owner": u.id == (team.owner_id if team else None),
                 })
         return {"members": members}
@@ -276,6 +278,51 @@ def kick_member(
         db.delete(membership)
         db.commit()
         return {"ok": True}
+
+
+class MemberUpdateRequest(BaseModel):
+    role: str | None = None
+    notification_tags: list[str] | None = None
+
+
+@router.patch("/api/teams/{team_id}/members/{target_user_id}")
+def update_member(
+    team_id: int,
+    target_user_id: int,
+    req: MemberUpdateRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        _assert_member(db, user_id, team_id)
+        team = db.get(Team, team_id)
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+        
+        # Only owners can change roles or update other members' settings
+        if target_user_id != user_id and team.owner_id != user_id:
+            raise HTTPException(status_code=403, detail="Only team owners can update other members")
+        if req.role is not None and team.owner_id != user_id:
+            raise HTTPException(status_code=403, detail="Only team owners can change roles")
+
+        membership = db.execute(
+            select(TeamMembership).where(
+                TeamMembership.user_id == target_user_id,
+                TeamMembership.team_id == team_id,
+            )
+        ).scalar_one_or_none()
+        
+        if not membership:
+            raise HTTPException(status_code=404, detail="Member not found")
+            
+        if req.role is not None:
+            membership.role = req.role
+        if req.notification_tags is not None:
+            membership.notification_tags = req.notification_tags
+            
+        db.commit()
+        
+        u = db.get(User, target_user_id)
+        return {**_member_out(u, membership), "is_owner": u.id == team.owner_id}
 
 
 # ── topics ────────────────────────────────────────────────────────────────────

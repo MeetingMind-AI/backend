@@ -126,6 +126,8 @@ class TeamMembership(Base):
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default=text("'member'"))
+    notification_tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="memberships")
     team: Mapped[Team] = relationship(back_populates="memberships")
@@ -209,6 +211,7 @@ class AgentAction(Base):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'pending'")
     )
+    tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     meeting: Mapped[Meeting] = relationship(back_populates="agent_actions")
     assignee: Mapped["User"] = relationship(foreign_keys=[assignee_id])

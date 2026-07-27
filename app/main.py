@@ -599,6 +599,7 @@ def list_all_actions(
                 "action_type": a.action_type,
                 "content": a.content,
                 "status": a.status,
+                "tags": a.tags or [],
                 "assignee": {
                     "id": u.id,
                     "name": u.name,
@@ -647,6 +648,7 @@ def list_actions(
                 "action_type": t,
                 "content": a.content,
                 "status": a.status,
+                "tags": a.tags or [],
                 "assignee": {
                     "id": u.id,
                     "name": u.name,
@@ -663,6 +665,7 @@ class ActionReviewRequest(BaseModel):
     content: str | None = None
     assignee_id: int | None = None
     action_type: str | None = Field(default=None, pattern="^(parking_lot|to_do|to_schedule)$")
+    tags: list[str] | None = None
 
 
 @app.patch("/api/meetings/{meeting_id}/actions/{action_id}")
@@ -690,6 +693,8 @@ def review_action(
             action.assignee_id = update_data["assignee_id"]
         if "action_type" in update_data:
             action.action_type = update_data["action_type"]
+        if "tags" in update_data:
+            action.tags = update_data["tags"]
         try:
             db.commit()
             db.refresh(action)
@@ -700,13 +705,15 @@ def review_action(
             ) from exc
         status = action.status
         content = action.content
-    return {"ok": True, "id": action_id, "status": status, "content": content}
+        tags = action.tags or []
+    return {"ok": True, "id": action_id, "status": status, "content": content, "tags": tags}
 
 
 class ActionCreateRequest(BaseModel):
     action_type: str = Field(pattern="^(parking_lot|to_do|to_schedule)$")
     content: str
     assignee_id: int | None = None
+    tags: list[str] | None = None
 
 @app.post("/api/meetings/{meeting_id}/actions")
 def create_action(
@@ -727,7 +734,8 @@ def create_action(
             action_type=request.action_type,
             content=request.content,
             assignee_id=request.assignee_id,
-            status="pending"
+            status="pending",
+            tags=request.tags or [],
         )
         db.add(action)
         try:
@@ -742,12 +750,13 @@ def create_action(
             u = db.get(User, action.assignee_id)
             
         return {
-            "ok": True,
             "id": action.id,
+            "meeting_id": action.meeting_id,
             "agent_role": action.agent_role,
             "action_type": action.action_type,
             "content": action.content,
             "status": action.status,
+            "tags": action.tags or [],
             "assignee": {
                 "id": u.id,
                 "name": u.name,
