@@ -697,7 +697,12 @@ class ControllerAgent:
                         json_mode=True,
                         model=self._llm.model,
                     )
-                result = json.loads(raw)
+                clean_raw = raw.strip()
+                if clean_raw.startswith("```"):
+                    clean_raw = clean_raw.split("\n", 1)[-1]
+                if clean_raw.endswith("```"):
+                    clean_raw = clean_raw.rsplit("\n", 1)[0]
+                result = json.loads(clean_raw)
                 summary = result.get("summary", "IGNORE")
                 proposal = result.get("proposal")
                 return role, {"text": summary, "proposal": proposal}
