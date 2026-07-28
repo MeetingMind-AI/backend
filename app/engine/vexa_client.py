@@ -496,10 +496,6 @@ async def sync_final_transcript_from_vexa(
             )
             return 0
 
-        db.execute(
-            delete(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id)
-        )
-
         new_chunks: list[TranscriptChunk] = []
         for segment in canonical_segments:
             text = str(segment.get("text", "")).strip()
@@ -524,7 +520,17 @@ async def sync_final_transcript_from_vexa(
             inserted_count += 1
 
         if new_chunks:
+            # Only delete existing chunks when there are replacement segments to insert.
+            # If Vexa returns empty data, we preserve the live-captured transcript.
+            db.execute(
+                delete(TranscriptChunk).where(TranscriptChunk.meeting_id == meeting_id)
+            )
             db.add_all(new_chunks)
+        else:
+            print(
+                f"[Vexa] No canonical segments from Vexa for meeting {meeting_id}; "
+                "preserving existing transcript chunks"
+            )
 
         try:
             db.commit()
