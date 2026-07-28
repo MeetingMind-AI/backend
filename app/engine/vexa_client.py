@@ -63,7 +63,7 @@ def _vexa_api_base_url() -> str:
     configured = (
         os.getenv("VEXA_API_BASE_URL")
         or os.getenv("VEXA_API_URL")
-        or "http://host.docker.internal:8056"
+        or "http://host.docker.internal:18056"
     ).strip()
 
     if configured.endswith("/bots"):

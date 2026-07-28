@@ -240,8 +240,9 @@ async def start_meeting(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
+            vexa_api_url = os.getenv("VEXA_API_URL", "http://host.docker.internal:18056/bots")
             bot_response = await client.post(
-                "http://host.docker.internal:8056/bots",
+                vexa_api_url,
                 json=bot_payload,
                 headers=headers,
             )
@@ -343,11 +344,14 @@ async def leave_meeting(
     if platform and native_id and vexa_api_key:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.delete(
-                    f"http://host.docker.internal:8056/bots/{platform}/{native_id}",
+                vexa_api_url = os.getenv("VEXA_API_URL", "http://host.docker.internal:18056/bots")
+                # Ensure the url ends with bots before appending platform/native_id
+                base_bots_url = vexa_api_url if vexa_api_url.endswith("/bots") else f"{vexa_api_url}/bots"
+                bot_response = await client.delete(
+                    f"{base_bots_url}/{platform}/{native_id}",
                     headers={"X-API-Key": vexa_api_key},
                 )
-            response.raise_for_status()
+            bot_response.raise_for_status()
         except httpx.HTTPError as exc:
             print(f"[Leave] Failed to remove bot: {exc}")
 
