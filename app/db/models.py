@@ -1,3 +1,11 @@
+"""
+SQLAlchemy ORM Models Module.
+
+Defines the database schema for MeetingMind-AI, including Users, Auth Sessions,
+Teams, Memberships, Meetings, Transcript Chunks, Action Items (Agent Actions),
+Topics, and Team Prompt Customizations.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -21,7 +29,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.session import Base
 
 
-# M2M association table — no ORM class needed
+# M2M association table linking Meetings and Topics
 meeting_topics = Table(
     "meeting_topics",
     Base.metadata,
@@ -39,6 +47,13 @@ meeting_topics = Table(
 
 
 class User(Base):
+    """User ORM Model.
+
+    Represents registered application users, holding identity credentials (hashed password),
+    profile avatar data, created timestamps, and relationships to authentication sessions,
+    team memberships, and owned teams.
+    """
+
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -64,6 +79,12 @@ class User(Base):
 
 
 class Session(Base):
+    """Auth Session ORM Model.
+
+    Represents active user login sessions authenticated via opaque HTTP cookie tokens.
+    Automatically deleted when the associated User is deleted.
+    """
+
     __tablename__ = "sessions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -81,6 +102,12 @@ class Session(Base):
 
 
 class Team(Base):
+    """Team ORM Model.
+
+    Represents organizational teams or workspaces containing members, custom prompt
+    overrides, topics, and associated meetings.
+    """
+
     __tablename__ = "teams"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -113,6 +140,12 @@ class Team(Base):
 
 
 class TeamMembership(Base):
+    """Team Membership ORM Model.
+
+    Junction table linking Users to Teams, tracking roles (e.g., owner, admin, member)
+    and notification tag preferences for action items.
+    """
+
     __tablename__ = "team_memberships"
     __table_args__ = (UniqueConstraint("user_id", "team_id"),)
 
@@ -134,6 +167,13 @@ class TeamMembership(Base):
 
 
 class Meeting(Base):
+    """Meeting ORM Model.
+
+    Stores real-time or recorded meeting metadata, execution status ('pending', 'running',
+    'completed', 'failed'), JSON summaries, multi-persona debate discussion logs, participant
+    speaker lists, and links to transcript chunks and action items.
+    """
+
     __tablename__ = "meetings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -176,6 +216,12 @@ class Meeting(Base):
 
 
 class TranscriptChunk(Base):
+    """Transcript Chunk ORM Model.
+
+    Stores individual speaker audio/text utterances captured during a meeting,
+    with exact UTC timestamps and speaker identity.
+    """
+
     __tablename__ = "transcript_chunks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -192,6 +238,13 @@ class TranscriptChunk(Base):
 
 
 class AgentAction(Base):
+    """Agent Action (Action Item) ORM Model.
+
+    Stores action items extracted by LLM personas or manually created by users,
+    including assignee user ID, agent role, action type, description text, status
+    ('pending', 'approved', 'rejected'), and tags.
+    """
+
     __tablename__ = "agent_actions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -218,6 +271,12 @@ class AgentAction(Base):
 
 
 class Topic(Base):
+    """Topic ORM Model.
+
+    Represents meeting categorization tags/labels associated with teams,
+    including custom badge background colors (HEX).
+    """
+
     __tablename__ = "topics"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -239,6 +298,12 @@ class Topic(Base):
 
 
 class TeamPromptConfig(Base):
+    """Team Prompt Config ORM Model.
+
+    Stores team-specific prompt overrides for multi-agent synthesis personas
+    (e.g., 'tech_lead', 'product_manager', 'scrum_master').
+    """
+
     __tablename__ = "team_prompt_configs"
     __table_args__ = (UniqueConstraint("team_id", "prompt_key"),)
 
@@ -253,3 +318,4 @@ class TeamPromptConfig(Base):
     )
 
     team: Mapped[Team] = relationship(back_populates="prompt_configs")
+

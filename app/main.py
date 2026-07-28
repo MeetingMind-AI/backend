@@ -1,3 +1,12 @@
+"""
+FastAPI Main Application and REST/WebSocket Gateway Module.
+
+Entry point for the MeetingMind-AI backend service. Configures routing, database
+schema initialization, meeting lifecycle control (start, leave, rename, delete),
+real-time transcript polling, Instant Clarity generation, Vexa webhook handling,
+action item management, and service health checks.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -34,6 +43,14 @@ from app.engine.vexa_client import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """FastAPI lifespan context manager for database schema migrations and startup setup.
+
+    Ensures all database tables and column additions (e.g. `speakers` JSONB column)
+    are created before accepting incoming HTTP requests.
+
+    Args:
+        app (FastAPI): The application instance.
+    """
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speakers JSONB"))
@@ -64,6 +81,14 @@ app.include_router(websocket_router)
 
 
 class MeetingStartRequest(BaseModel):
+    """Meeting Start Request Schema.
+
+    Attributes:
+        platform (str): Meeting platform identifier (e.g. 'google_meet', 'teams', 'zoom').
+        native_id (str): Native meeting URL or code string.
+        team_id (int | None): Optional team workspace ID.
+        passcode (str | None): Optional meeting passcode.
+    """
     platform: str = Field(min_length=1)
     native_id: str = Field(min_length=1)
     team_id: int | None = None
@@ -71,10 +96,21 @@ class MeetingStartRequest(BaseModel):
 
 
 class MeetingRenameRequest(BaseModel):
+    """Meeting Rename Request Schema.
+
+    Attributes:
+        title (str): New title string for the meeting (1-255 characters).
+    """
     title: str = Field(min_length=1, max_length=255)
 
 
 class ClarityRequest(BaseModel):
+    """Instant Clarity Request Schema.
+
+    Attributes:
+        mode (str): Explanation mode ('technical' or 'business').
+        last_x_minutes (int | None): Optional minute cutoff window for recent transcript context.
+    """
     mode: str = Field(pattern="^(technical|business)$", default="technical")
     last_x_minutes: int | None = Field(default=None, ge=1)
 
@@ -85,6 +121,16 @@ class ClarityRequest(BaseModel):
 def _find_local_meeting_id(
     vexa_meeting_id: str | None, platform: str, native_id: str
 ) -> int | None:
+    """Look up local meeting primary key ID by remote Vexa meeting ID or platform/native_id fallback.
+
+    Args:
+        vexa_meeting_id (str | None): Remote Vexa meeting ID.
+        platform (str): Platform identifier string.
+        native_id (str): Native platform meeting ID string.
+
+    Returns:
+        int | None: Local meeting primary key ID if found, None otherwise.
+    """
     with SessionLocal() as db:
         if vexa_meeting_id:
             by_vexa = (
@@ -112,6 +158,14 @@ def _find_local_meeting_id(
 
 
 def _get_local_meeting_context(local_meeting_id: int) -> tuple[str, str]:
+    """Extract platform and native ID from local meeting title string.
+
+    Args:
+        local_meeting_id (int): Primary key ID of the meeting.
+
+    Returns:
+        tuple[str, str]: Tuple of (platform, native_id).
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, local_meeting_id)
         if meeting is None:
@@ -123,17 +177,17 @@ def _get_local_meeting_context(local_meeting_id: int) -> tuple[str, str]:
         return platform.strip(), native_id.strip()
 
 
-def _user_id_from_cookie(mm_session: str | None) -> int | None:
-    if not mm_session:
-        return None
-    with SessionLocal() as db:
-        row = db.execute(
-            select(Session).where(Session.token == mm_session)
-        ).scalar_one_or_none()
-        return int(row.user_id) if row else None
-
-
 def _assert_member(db: Any, user_id: int, team_id: int) -> None:
+    """Verify user membership in team.
+
+    Args:
+        db: Active database session.
+        user_id (int): User ID to verify.
+        team_id (int): Team ID to verify.
+
+    Raises:
+        HTTPException: HTTP 403 Forbidden if not a team member.
+    """
     row = db.execute(
         select(TeamMembership).where(
             TeamMembership.user_id == user_id,
@@ -153,6 +207,19 @@ async def start_meeting(
     background_tasks: BackgroundTasks,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, int]:
+    """Deploy Vexa transcription bot and initiate background polling tasks for a new meeting.
+
+    Args:
+        request (MeetingStartRequest): Meeting start settings payload.
+        background_tasks (BackgroundTasks): FastAPI background task manager.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, int]: Dictionary containing generated local `meeting_id`.
+
+    Raises:
+        HTTPException: 500/502 for Vexa deployment errors or DB failures.
+    """
     if request.team_id is not None:
         with SessionLocal() as db:
             _assert_member(db, user_id, request.team_id)
@@ -229,6 +296,7 @@ async def start_meeting(
             ) from exc
 
     async def run_meeting_tasks():
+        """Execute async polling and monitoring loops for active meeting."""
         await asyncio.gather(
             poll_transcripts_from_vexa(
                 meeting.id,
@@ -252,6 +320,16 @@ async def leave_meeting(
     background_tasks: BackgroundTasks,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Remove Vexa bot from meeting and schedule background finalization.
+
+    Args:
+        meeting_id (int): Primary key ID of local meeting.
+        background_tasks (BackgroundTasks): Background tasks manager.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        JSONResponse: HTTP 202 Accepted response with status payload.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -288,6 +366,14 @@ async def leave_meeting(
 async def _finalize_meeting(
     meeting_id: int, platform: str, native_id: str, api_key: str
 ) -> None:
+    """Async background task for final transcript sync, speaker sync, and report generation.
+
+    Args:
+        meeting_id (int): Primary key ID of the meeting.
+        platform (str): Platform name string.
+        native_id (str): Native meeting URL/ID.
+        api_key (str): Vexa API key.
+    """
     update_meeting_status(meeting_id, "completed")
 
     if platform and native_id and api_key:
@@ -318,6 +404,16 @@ async def explain_meeting(
     request: ClarityRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, str]:
+    """Generate Instant Clarity technical or business explanation for recent meeting content.
+
+    Args:
+        meeting_id (int): Target meeting primary key ID.
+        request (ClarityRequest): Clarity mode and window payload.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, str]: Dictionary containing generated explanation string.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -341,6 +437,19 @@ async def handle_vexa_webhook(
     background_tasks: BackgroundTasks,
     request: Request,
 ) -> dict[str, Any]:
+    """Ingress handler for Vexa bot status change and completion webhooks.
+
+    Args:
+        event (dict[str, Any]): Webhook JSON payload.
+        background_tasks (BackgroundTasks): Background tasks runner.
+        request (Request): HTTP request context for authentication header inspection.
+
+    Returns:
+        dict[str, Any]: Processing status confirmation object.
+
+    Raises:
+        HTTPException: 401 if webhook secret header is invalid, 422 if payload invalid.
+    """
     webhook_secret = os.getenv("VEXA_WEBHOOK_SECRET", "").strip()
     if webhook_secret:
         auth_header = request.headers.get("authorization", "")
@@ -422,6 +531,15 @@ def list_meetings(
     team_id: int | None = Query(default=None),
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """List meetings accessible to user, optionally filtered by team ID.
+
+    Args:
+        team_id (int | None): Optional team primary key filter.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: List of meeting summaries with topics and speaker lists.
+    """
     with SessionLocal() as db:
         if team_id is not None:
             _assert_member(db, user_id, team_id)
@@ -460,6 +578,15 @@ def get_meeting(
     meeting_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Retrieve detailed record for a single meeting.
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Meeting record dictionary.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -493,6 +620,16 @@ def rename_meeting(
     request: MeetingRenameRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Update title of a meeting record.
+
+    Args:
+        meeting_id (int): Primary key ID of meeting.
+        request (MeetingRenameRequest): Payload with new title string.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Updated meeting title dictionary.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -515,6 +652,15 @@ def delete_meeting_record(
     meeting_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Delete meeting record and associated transcript chunks and action items.
+
+    Args:
+        meeting_id (int): Target meeting primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Success confirmation `{"ok": True}`.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -537,6 +683,15 @@ def get_transcript(
     meeting_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Retrieve chronologically ordered transcript chunks for a meeting.
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Dictionary containing list of transcript chunk items.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -568,6 +723,15 @@ def list_all_actions(
     team_id: int | None = Query(default=None),
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """List all action items grouped by category and approval status across meetings.
+
+    Args:
+        team_id (int | None): Optional team primary key filter.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Categorized action items dictionary ('parking_lot', 'to_do', 'to_schedule').
+    """
     with SessionLocal() as db:
         if team_id is not None:
             _assert_member(db, user_id, team_id)
@@ -616,6 +780,15 @@ def list_actions(
     meeting_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """List action items for a single meeting grouped by type and status.
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Grouped action items dictionary.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -661,6 +834,15 @@ def list_actions(
 
 
 class ActionReviewRequest(BaseModel):
+    """Action Item Review/Update Schema.
+
+    Attributes:
+        status (str | None): Optional status ('accepted', 'rejected', 'pending').
+        content (str | None): Optional updated text content.
+        assignee_id (int | None): Optional assigned user ID.
+        action_type (str | None): Optional action category.
+        tags (list[str] | None): Optional list of tags.
+    """
     status: str | None = Field(default=None, pattern="^(accepted|rejected|pending)$")
     content: str | None = None
     assignee_id: int | None = None
@@ -675,6 +857,17 @@ def review_action(
     request: ActionReviewRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Review or edit an existing action item (status, assignee, tags, content).
+
+    Args:
+        meeting_id (int): Primary key ID of meeting.
+        action_id (int): Primary key ID of action item.
+        request (ActionReviewRequest): Update request fields.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Confirmation dictionary with updated fields.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -710,10 +903,19 @@ def review_action(
 
 
 class ActionCreateRequest(BaseModel):
+    """Manual Action Item Creation Schema.
+
+    Attributes:
+        action_type (str): Action category ('parking_lot', 'to_do', 'to_schedule').
+        content (str): Text description of action item.
+        assignee_id (int | None): Optional assigned user ID.
+        tags (list[str] | None): Optional list of tags.
+    """
     action_type: str = Field(pattern="^(parking_lot|to_do|to_schedule)$")
     content: str
     assignee_id: int | None = None
     tags: list[str] | None = None
+
 
 @app.post("/api/meetings/{meeting_id}/actions")
 def create_action(
@@ -721,6 +923,16 @@ def create_action(
     request: ActionCreateRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Manually create a new action item for a meeting.
+
+    Args:
+        meeting_id (int): Primary key ID of meeting.
+        request (ActionCreateRequest): Action item attributes payload.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Newly created action item dictionary.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -767,4 +979,10 @@ def create_action(
 
 @app.get("/health", tags=["health"])
 def health_check() -> dict[str, str]:
+    """Liveness check endpoint returning standard status response.
+
+    Returns:
+        dict[str, str]: `{"status": "ok"}`
+    """
     return {"status": "ok"}
+

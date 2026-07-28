@@ -1,3 +1,11 @@
+"""
+WebSocket Real-Time Transcript Ingestion API Module.
+
+Provides WebSocket endpoints for receiving incoming speaker transcript utterances,
+broadcasting transcript snapshots and live updates to connected web clients,
+and triggering real-time LLM summarization and action item proposals.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -18,8 +26,26 @@ router = APIRouter()
 
 @router.websocket("/api/ws/ingest/{meeting_id}")
 async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
+    """Handle real-time transcript chunk ingestion over WebSocket.
+
+    Maintains a persistent bi-directional WebSocket connection for a meeting. On connect,
+    loads team prompt customizations, pre-meeting memory context, and sends a full transcript
+    snapshot. On receiving incoming transcript chunks:
+    1. Persists the transcript chunk to database.
+    2. Broadcasts the chunk to all connected clients via WebSocket.
+    3. Triggers `ControllerAgent.summarize()` to run real-time AI analysis.
+    4. Broadcasts insights and automatically persists proposed action items.
+
+    Args:
+        websocket (WebSocket): Incoming client WebSocket instance.
+        meeting_id (int): Primary key ID of the target meeting.
+
+    Raises:
+        WebSocketDisconnect: Raised automatically when client drops connection.
+    """
     await manager.connect(meeting_id, websocket)
     controller = ControllerAgent()
+
 
     # Resolve team prompts once per connection (cached for the duration of the meeting)
     with SessionLocal() as db:

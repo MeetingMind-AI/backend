@@ -1,3 +1,12 @@
+"""
+LLM Persona System and User Prompt Templates Registry Module.
+
+Defines default system prompts and user prompt templates for real-time transcript
+monitoring, initial independent persona analyses (Tech Lead, Product Manager),
+cross-functional debate rounds, final synthesis (Scrum Master), and Instant Clarity.
+Provides `get_team_prompts()` to load team-specific prompt customizations from database.
+"""
+
 # ---------------------------------------------------------------------------
 # Real-time persona prompts (used during live transcript ingestion)
 # ---------------------------------------------------------------------------
@@ -305,7 +314,18 @@ PROMPT_DEFAULTS: dict[str, str] = {
 
 
 def get_team_prompts(team_id: int | None, db) -> dict[str, str]:
-    """Returns PROMPT_DEFAULTS merged with any team-specific overrides stored in DB."""
+    """Retrieve active prompt templates for a team, merging defaults with DB overrides.
+
+    Queries `TeamPromptConfig` for custom prompt text overrides stored for the given `team_id`.
+    If `team_id` is None, returns the global `PROMPT_DEFAULTS` dictionary unchanged.
+
+    Args:
+        team_id (int | None): Primary key ID of team, or None for defaults.
+        db: Active SQLAlchemy database session.
+
+    Returns:
+        dict[str, str]: Dictionary mapping prompt keys to custom or default prompt strings.
+    """
     result = dict(PROMPT_DEFAULTS)
     if team_id is None:
         return result
@@ -318,3 +338,4 @@ def get_team_prompts(team_id: int | None, db) -> dict[str, str]:
         if row.prompt_key in result:
             result[row.prompt_key] = row.prompt_text
     return result
+

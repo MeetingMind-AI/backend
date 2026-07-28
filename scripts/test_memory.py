@@ -1,3 +1,10 @@
+"""
+Mem0 Memory Integration Test Script.
+
+Tests real-time notification extraction, final report synthesis, Mem0 vector storage,
+and Mem0 query retrieval for a mock meeting.
+"""
+
 import asyncio
 from datetime import datetime, timezone, timedelta
 import json
@@ -19,6 +26,14 @@ MOCK_TRANSCRIPT = [
 
 
 def _parse_transcript_line(line: str) -> tuple[str, str]:
+    """Parse speaker name and text content from a transcript line.
+
+    Args:
+        line (str): Raw transcript string.
+
+    Returns:
+        tuple[str, str]: Tuple of (speaker, text).
+    """
     if ":" not in line:
         return "Unknown", line.strip()
     speaker, text = line.split(":", 1)
@@ -26,6 +41,8 @@ def _parse_transcript_line(line: str) -> tuple[str, str]:
 
 
 async def main() -> None:
+    """Execute end-to-end integration test for summarization, report generation, and Mem0 memory."""
+
     print("Starting Memory Integration Test...")
 
     with SessionLocal() as db:

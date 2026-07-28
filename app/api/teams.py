@@ -1,3 +1,10 @@
+"""
+Teams, Memberships, Topics, and Prompt Customization REST API Module.
+
+Manages team lifecycle operations including team creation, membership invites,
+role-based access control, topic tagging, and custom persona prompt overrides.
+"""
+
 from __future__ import annotations
 
 import uuid
@@ -20,6 +27,16 @@ router = APIRouter(tags=["teams"])
 
 
 def _assert_member(db, user_id: int, team_id: int) -> None:
+    """Verify that a user is a member of the specified team.
+
+    Args:
+        db: Active database session.
+        user_id (int): User ID to check.
+        team_id (int): Team ID to check.
+
+    Raises:
+        HTTPException: HTTP 403 Forbidden if user is not a team member.
+    """
     row = db.execute(
         select(TeamMembership).where(
             TeamMembership.user_id == user_id,
@@ -31,6 +48,19 @@ def _assert_member(db, user_id: int, team_id: int) -> None:
 
 
 def _assert_owner(db, user_id: int, team_id: int) -> Team:
+    """Verify that a user is the owner of the specified team.
+
+    Args:
+        db: Active database session.
+        user_id (int): User ID to check.
+        team_id (int): Team ID to check.
+
+    Returns:
+        Team: Team ORM model instance if user is owner.
+
+    Raises:
+        HTTPException: 404 if team not found, 403 if user is not the team owner.
+    """
     team = db.get(Team, team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -40,6 +70,15 @@ def _assert_owner(db, user_id: int, team_id: int) -> Team:
 
 
 def _member_out(user: User, membership: TeamMembership) -> dict[str, Any]:
+    """Format User and TeamMembership ORM models into a public JSON object.
+
+    Args:
+        user (User): User model instance.
+        membership (TeamMembership): Membership model instance.
+
+    Returns:
+        dict[str, Any]: Formatted member attributes dictionary.
+    """
     return {
         "id": user.id,
         "name": user.name,
@@ -51,6 +90,14 @@ def _member_out(user: User, membership: TeamMembership) -> dict[str, Any]:
 
 
 def _topic_out(topic: Topic) -> dict[str, Any]:
+    """Format Topic ORM model into a JSON object.
+
+    Args:
+        topic (Topic): Topic model instance.
+
+    Returns:
+        dict[str, Any]: Formatted topic dictionary.
+    """
     return {
         "id": topic.id,
         "name": topic.name,
@@ -62,15 +109,33 @@ def _topic_out(topic: Topic) -> dict[str, Any]:
 
 
 class TeamCreateRequest(BaseModel):
+    """Team Creation Request Schema.
+
+    Attributes:
+        name (str): Name of the new team.
+    """
     name: str
 
 
 class TeamUpdateRequest(BaseModel):
+    """Team Update Request Schema.
+
+    Attributes:
+        name (str): New name for the team.
+    """
     name: str
 
 
 @router.get("/api/teams")
 def list_teams(user_id: int = Depends(get_current_user_id)) -> dict[str, Any]:
+    """List all teams that the current authenticated user belongs to.
+
+    Args:
+        user_id (int): Primary key ID of authenticated user.
+
+    Returns:
+        dict[str, Any]: Dictionary containing list of teams with member counts.
+    """
     with SessionLocal() as db:
         memberships = db.execute(
             select(TeamMembership).where(TeamMembership.user_id == user_id)
@@ -99,6 +164,15 @@ def list_teams(user_id: int = Depends(get_current_user_id)) -> dict[str, Any]:
 def create_team(
     req: TeamCreateRequest, user_id: int = Depends(get_current_user_id)
 ) -> dict[str, Any]:
+    """Create a new team workspace and designate creator as owner and member.
+
+    Args:
+        req (TeamCreateRequest): Request body with team name.
+        user_id (int): Creator's user ID from auth dependency.
+
+    Returns:
+        dict[str, Any]: Dictionary describing newly created team.
+    """
     with SessionLocal() as db:
         team = Team(
             name=req.name.strip(),
@@ -124,6 +198,18 @@ def create_team(
 def get_team(
     team_id: int, user_id: int = Depends(get_current_user_id)
 ) -> dict[str, Any]:
+    """Retrieve detailed information for a specific team.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Detailed team dictionary including member list and topics.
+
+    Raises:
+        HTTPException: 403 if not a member, 404 if team not found.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         team = db.get(Team, team_id)
@@ -160,6 +246,19 @@ def update_team(
     req: TeamUpdateRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Update team metadata (only accessible by team owner).
+
+    Args:
+        team_id (int): Target team primary key ID.
+        req (TeamUpdateRequest): Updated team settings payload.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Updated team attributes.
+
+    Raises:
+        HTTPException: 403 if user is not team owner.
+    """
     with SessionLocal() as db:
         team = _assert_owner(db, user_id, team_id)
         team.name = req.name.strip()
@@ -171,6 +270,18 @@ def update_team(
 def leave_team(
     team_id: int, user_id: int = Depends(get_current_user_id)
 ) -> dict[str, Any]:
+    """Remove authenticated user from team membership.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Success confirmation `{"ok": True}`.
+
+    Raises:
+        HTTPException: 400 if team owner tries to leave without transferring ownership.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         team = db.get(Team, team_id)
@@ -199,6 +310,19 @@ def get_invite_link(
     request: Request,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Generate or fetch team invite link (only accessible by team owner).
+
+    Args:
+        team_id (int): Target team primary key ID.
+        request (Request): HTTP request context for base URL resolution.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Dictionary containing full invite URL and token.
+
+    Raises:
+        HTTPException: 403 if user is not team owner.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         team = db.get(Team, team_id)
@@ -217,6 +341,18 @@ def get_invite_link(
 def join_team(
     invite_token: str, user_id: int = Depends(get_current_user_id)
 ) -> dict[str, Any]:
+    """Join a team using a unique invite token.
+
+    Args:
+        invite_token (str): 64-character hex invite token string.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Dictionary with team_id and team_name.
+
+    Raises:
+        HTTPException: 404 if invite token is invalid.
+    """
     with SessionLocal() as db:
         team = db.execute(
             select(Team).where(Team.invite_token == invite_token)
@@ -240,6 +376,15 @@ def join_team(
 def list_members(
     team_id: int, user_id: int = Depends(get_current_user_id)
 ) -> dict[str, Any]:
+    """List all members belonging to a team.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Dictionary containing list of member objects.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         team = db.get(Team, team_id)
@@ -263,6 +408,19 @@ def kick_member(
     target_user_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Remove a member from a team (only accessible by team owner).
+
+    Args:
+        team_id (int): Target team primary key ID.
+        target_user_id (int): User ID to kick from team.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Confirmation `{"ok": True}`.
+
+    Raises:
+        HTTPException: 400 if owner tries to kick self, 403 if caller is not owner.
+    """
     with SessionLocal() as db:
         _assert_owner(db, user_id, team_id)
         if target_user_id == user_id:
@@ -281,6 +439,12 @@ def kick_member(
 
 
 class MemberUpdateRequest(BaseModel):
+    """Member Role and Preferences Update Schema.
+
+    Attributes:
+        role (str | None): Optional new membership role string.
+        notification_tags (list[str] | None): Optional list of notification tags.
+    """
     role: str | None = None
     notification_tags: list[str] | None = None
 
@@ -292,6 +456,20 @@ def update_member(
     req: MemberUpdateRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Update team member role or notification tag preferences.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        target_user_id (int): User ID of member being updated.
+        req (MemberUpdateRequest): Payload containing role or tags.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Updated member object.
+
+    Raises:
+        HTTPException: 403 if non-owner attempts to update another member or role.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         team = db.get(Team, team_id)
@@ -329,11 +507,23 @@ def update_member(
 
 
 class TopicCreateRequest(BaseModel):
+    """Topic Creation Request Schema.
+
+    Attributes:
+        name (str): Topic title.
+        color (str): HEX color code string (default "#4f8ef7").
+    """
     name: str
     color: str = "#4f8ef7"
 
 
 class TopicUpdateRequest(BaseModel):
+    """Topic Update Request Schema.
+
+    Attributes:
+        name (str | None): Optional new topic title.
+        color (str | None): Optional new HEX color string.
+    """
     name: str | None = None
     color: str | None = None
 
@@ -342,6 +532,15 @@ class TopicUpdateRequest(BaseModel):
 def list_topics(
     team_id: int, user_id: int = Depends(get_current_user_id)
 ) -> dict[str, Any]:
+    """List all topic categories defined for a team.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Dictionary containing topic list.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         topics = db.execute(
@@ -356,6 +555,16 @@ def create_topic(
     req: TopicCreateRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Create a new topic category for a team.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        req (TopicCreateRequest): Payload with topic name and color.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Newly created topic dictionary.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         topic = Topic(team_id=team_id, name=req.name.strip(), color=req.color)
@@ -372,6 +581,17 @@ def update_topic(
     req: TopicUpdateRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Update topic name or badge color.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        topic_id (int): Target topic primary key ID.
+        req (TopicUpdateRequest): Updated topic fields.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Updated topic dictionary.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         topic = db.get(Topic, topic_id)
@@ -391,6 +611,16 @@ def delete_topic(
     topic_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Delete a topic from a team.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        topic_id (int): Target topic primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Success confirmation `{"ok": True}`.
+    """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         topic = db.get(Topic, topic_id)
@@ -447,6 +677,11 @@ PROMPT_VARIABLES: dict[str, str] = {
 
 
 class PromptUpdateRequest(BaseModel):
+    """Prompt Override Update Schema.
+
+    Attributes:
+        prompt_text (str): Customized system/user prompt template text.
+    """
     prompt_text: str
 
 
@@ -454,6 +689,15 @@ class PromptUpdateRequest(BaseModel):
 def list_prompts(
     team_id: int, user_id: int = Depends(get_current_user_id)
 ) -> dict[str, Any]:
+    """List all AI prompt configurations for a team, including custom overrides.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: List of prompt settings with labels, descriptions, and defaults.
+    """
     with SessionLocal() as db:
         _assert_owner(db, user_id, team_id)
         overrides = {
@@ -485,6 +729,20 @@ def upsert_prompt(
     req: PromptUpdateRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Create or update a team-specific prompt override (only team owner).
+
+    Args:
+        team_id (int): Target team primary key ID.
+        prompt_key (str): Prompt configuration key.
+        req (PromptUpdateRequest): Payload containing custom prompt text.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Status dictionary `{"key": prompt_key, "is_custom": True}`.
+
+    Raises:
+        HTTPException: 400 for invalid or read-only prompt keys, 403 if not team owner.
+    """
     if prompt_key not in VALID_PROMPT_KEYS:
         raise HTTPException(status_code=400, detail=f"Invalid prompt key: {prompt_key}")
     if prompt_key in PROMPT_READONLY_KEYS:
@@ -515,6 +773,19 @@ def reset_prompt(
     prompt_key: str,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Reset a custom prompt override back to default (only team owner).
+
+    Args:
+        team_id (int): Target team primary key ID.
+        prompt_key (str): Prompt configuration key.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Status dictionary `{"key": prompt_key, "is_custom": False}`.
+
+    Raises:
+        HTTPException: 400 for invalid/read-only prompt keys, 404 if no custom prompt exists.
+    """
     if prompt_key not in VALID_PROMPT_KEYS:
         raise HTTPException(status_code=400, detail=f"Invalid prompt key: {prompt_key}")
     if prompt_key in PROMPT_READONLY_KEYS:
@@ -543,6 +814,19 @@ def add_meeting_topic(
     topic_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Attach a topic badge to a meeting record.
+
+    Args:
+        meeting_id (int): Target meeting primary key ID.
+        topic_id (int): Target topic primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Confirmation `{"ok": True}`.
+
+    Raises:
+        HTTPException: 404 if meeting or topic not found, 400 if topic belongs to another team.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -576,6 +860,16 @@ def remove_meeting_topic(
     topic_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
+    """Detach a topic badge from a meeting record.
+
+    Args:
+        meeting_id (int): Target meeting primary key ID.
+        topic_id (int): Target topic primary key ID.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Confirmation `{"ok": True}`.
+    """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if not meeting:
@@ -590,3 +884,4 @@ def remove_meeting_topic(
         )
         db.commit()
         return {"ok": True}
+

@@ -1,3 +1,10 @@
+"""
+Alembic Database Migration Environment Script.
+
+Configures Alembic migration context, database URL generation, and triggers
+either offline SQL script generation or online direct database migration execution.
+"""
+
 from __future__ import annotations
 
 import os
@@ -12,6 +19,13 @@ config = context.config
 
 
 def _database_url() -> str:
+    """Construct database connection URL for Alembic migration execution.
+
+    Reads `DATABASE_URL` or builds PostgreSQL DSN from environment variable parameters.
+
+    Returns:
+        str: Driver-qualified PostgreSQL connection URL string.
+    """
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         if database_url.startswith("postgres://"):
@@ -37,6 +51,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
+    """Run Alembic database migrations in 'offline' mode to output raw SQL statements."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -51,6 +66,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    """Run Alembic database migrations in 'online' mode against connected database engine."""
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -72,3 +88,4 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
