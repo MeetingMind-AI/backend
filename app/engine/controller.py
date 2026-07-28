@@ -970,14 +970,45 @@ class ControllerAgent:
 
         # Extract the AI-generated title and overwrite the raw meeting ID
         try:
-            sm_data = json.loads(report.get("scrum_master", "{}"))
+            sm_raw = report.get("scrum_master", "{}").strip()
+            if sm_raw.startswith("```"):
+                import re
+                sm_raw = re.sub(r"^```[a-z]*\n", "", sm_raw)
+                sm_raw = re.sub(r"\n```$", "", sm_raw).strip()
+            sm_data = json.loads(sm_raw)
             new_title = sm_data.get("title")
             if new_title and isinstance(new_title, str):
                 meeting.title = new_title.strip()
         except Exception as exc:
             print(f"[_persist] Could not parse title from Scrum Master report: {exc}")
+            sm_data = {}
+
         if discussion_log and hasattr(meeting, "discussion_log"):
             meeting.discussion_log = discussion_log
+
+        # Backfill action items from the final summary if the live meeting didn't generate any
+        try:
+            from app.db.models import AgentAction
+            from sqlalchemy import select
+            existing_count = db.execute(
+                select(AgentAction).where(AgentAction.meeting_id == meeting_id)
+            ).scalars().first()
+
+            if not existing_count:
+                for t in sm_data.get("to_do", []):
+                    task_text = t.get("task", "") if isinstance(t, dict) else str(t)
+                    if task_text:
+                        db.add(AgentAction(meeting_id=meeting_id, agent_role="scrum_master", action_type="to_do", content=task_text, status="accepted"))
+                for p in sm_data.get("parking_lot", []):
+                    task_text = p.get("task", "") if isinstance(p, dict) else str(p)
+                    if task_text:
+                        db.add(AgentAction(meeting_id=meeting_id, agent_role="scrum_master", action_type="parking_lot", content=task_text, status="accepted"))
+                for s in sm_data.get("pending_to_schedule", []):
+                    task_text = s.get("task", "") if isinstance(s, dict) else str(s)
+                    if task_text:
+                        db.add(AgentAction(meeting_id=meeting_id, agent_role="scrum_master", action_type="to_schedule", content=task_text, status="accepted"))
+        except Exception as exc:
+            print(f"[_persist] Failed to backfill action items: {exc}")
 
         try:
             db.commit()
