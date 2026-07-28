@@ -715,7 +715,7 @@ def get_transcript(
                     "id": c.id,
                     "speaker": c.speaker,
                     "text": c.text,
-                    "timestamp": c.timestamp.isoformat(),
+                    "timestamp": c.timestamp.isoformat() if hasattr(c.timestamp, "isoformat") else str(c.timestamp) if c.timestamp else None,
                 }
                 for c in chunks
             ],
