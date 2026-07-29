@@ -923,6 +923,35 @@ def review_action(
     return {"ok": True, "id": action_id, "status": status, "content": content, "tags": tags}
 
 
+@app.delete("/api/meetings/{meeting_id}/actions/{action_id}")
+def delete_action(
+    meeting_id: int,
+    action_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, str]:
+    """Delete an action item.
+
+    Args:
+        meeting_id (int): Primary key ID of meeting.
+        action_id (int): Primary key ID of action item.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, str]: Confirmation dictionary.
+    """
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+        action = db.get(AgentAction, action_id)
+        if not action or action.meeting_id != meeting_id:
+            raise HTTPException(status_code=404, detail="Action not found")
+        db.delete(action)
+        db.commit()
+        return {"status": "ok"}
+
 class ActionCreateRequest(BaseModel):
     """Manual Action Item Creation Schema.
 
