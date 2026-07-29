@@ -273,13 +273,30 @@ async def start_meeting(
             select(Meeting).where(Meeting.vexa_meeting_id == vexa_meeting_id).limit(1)
         ).scalar_one_or_none()
 
-        if existing:
+        existing_is_terminal = (
+            existing is not None
+            and str(existing.status or "").strip().lower() in {"completed", "failed"}
+        )
+
+        if existing and not existing_is_terminal:
+            # Reuse an in-progress meeting (e.g. reconnect / duplicate request)
             existing.status = status
             existing.title = title
             meeting = existing
         else:
+            # Either no existing record, OR the existing one is already completed/failed.
+            # With a single Vexa worker the API may return the same vexa_meeting_id for
+            # a brand-new bot deployment.  We always create a fresh local record so the
+            # new meeting starts with a clean slate (no old transcript / actions).
+            # Append a short UUID suffix to satisfy the UNIQUE constraint when the old
+            # record is still present.
+            local_vexa_id = (
+                f"{vexa_meeting_id}:{uuid.uuid4().hex[:8]}"
+                if existing_is_terminal
+                else vexa_meeting_id
+            )
             meeting = Meeting(
-                vexa_meeting_id=vexa_meeting_id,
+                vexa_meeting_id=local_vexa_id,
                 title=title,
                 status=status,
                 team_id=request.team_id,
