@@ -722,6 +722,9 @@ class ControllerAgent:
                     clean_raw = clean_raw.split("\n", 1)[-1]
                 if clean_raw.endswith("```"):
                     clean_raw = clean_raw.rsplit("\n", 1)[0]
+                
+                print(f"[LLM RAW - {role}] {clean_raw}")
+                
                 result = json.loads(clean_raw)
                 summary = result.get("summary", "IGNORE")
                 proposal = result.get("proposal")

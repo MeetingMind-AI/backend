@@ -686,10 +686,11 @@ async def poll_transcripts_from_vexa(
                             continue
 
                         chunk_data = {
-                            "id": c.id,
+                            "id": c.timestamp.isoformat(),
                             "speaker": c.speaker,
                             "text": c.text,
                             "timestamp": c.timestamp.isoformat(),
+                            "is_final": not c.text.endswith("..."),
                         }
                         if ws_manager:
                             await ws_manager.broadcast(
@@ -697,73 +698,78 @@ async def poll_transcripts_from_vexa(
                                 {"event": "transcript_chunk", "data": chunk_data},
                             )
 
-                        try:
-                            with SessionLocal() as db:
-                                pending_rows = (
-                                    db.execute(
-                                        select(AgentAction.content).where(
-                                            AgentAction.meeting_id == meeting_id,
-                                            AgentAction.status == "pending",
+                        # --- Background Summarization Task ---
+                        async def _process_chunk_summary(chunk_text: str, current_meeting_id: int):
+                            try:
+                                with SessionLocal() as db_session:
+                                    pending_rows = (
+                                        db_session.execute(
+                                            select(AgentAction.content).where(
+                                                AgentAction.meeting_id == current_meeting_id,
+                                                AgentAction.status == "pending",
+                                            )
                                         )
+                                        .scalars()
+                                        .all()
                                     )
-                                    .scalars()
-                                    .all()
+                                result = await controller.summarize(
+                                    chunk_text,
+                                    existing_actions=pending_rows,
+                                    team_prompts=team_prompts,
                                 )
-                            result = await controller.summarize(
-                                c.text,
-                                existing_actions=pending_rows,
-                                team_prompts=team_prompts,
-                            )
-                            scrum = result.get("scrum_master", {})
-                            summary_text = scrum.get("text", "IGNORE")
-                            if (
-                                summary_text
-                                and summary_text.strip().upper() != "IGNORE"
-                                and ws_manager
-                            ):
-                                await ws_manager.broadcast(
-                                    meeting_id,
-                                    {
-                                        "event": "insight",
-                                        "data": {
-                                            "role": "scrum_master",
-                                            "text": summary_text,
+                                scrum = result.get("scrum_master", {})
+                                summary_text = scrum.get("text", "IGNORE")
+                                if (
+                                    summary_text
+                                    and summary_text.strip().upper() != "IGNORE"
+                                    and ws_manager
+                                ):
+                                    await ws_manager.broadcast(
+                                        current_meeting_id,
+                                        {
+                                            "event": "insight",
+                                            "data": {
+                                                "role": "scrum_master",
+                                                "text": summary_text,
+                                            },
                                         },
-                                    },
-                                )
+                                    )
 
-                            proposal_data = scrum.get("proposal")
-                            if proposal_data and ws_manager:
-                                with SessionLocal() as db2:
-                                    agent_action = AgentAction(
-                                        meeting_id=meeting_id,
-                                        agent_role="scrum_master",
-                                        action_type=proposal_data["type"],
-                                        content=proposal_data["content"],
-                                        status="pending",
-                                    )
-                                    db2.add(agent_action)
-                                    db2.commit()
-                                    db2.refresh(agent_action)
-                                await ws_manager.broadcast(
-                                    meeting_id,
-                                    {
-                                        "event": "proposal",
-                                        "data": {
-                                            "id": agent_action.id,
-                                            "type": proposal_data["type"],
-                                            "content": proposal_data["content"],
-                                            "status": "pending",
+                                proposal_data = scrum.get("proposal")
+                                if proposal_data and ws_manager:
+                                    with SessionLocal() as db2:
+                                        agent_action = AgentAction(
+                                            meeting_id=current_meeting_id,
+                                            agent_role="scrum_master",
+                                            action_type=proposal_data["type"],
+                                            content=proposal_data["content"],
+                                            status="pending",
+                                        )
+                                        db2.add(agent_action)
+                                        db2.commit()
+                                        db2.refresh(agent_action)
+                                    await ws_manager.broadcast(
+                                        current_meeting_id,
+                                        {
+                                            "event": "proposal",
+                                            "data": {
+                                                "id": agent_action.id,
+                                                "type": proposal_data["type"],
+                                                "content": proposal_data["content"],
+                                                "status": "pending",
+                                            },
                                         },
-                                    },
-                                )
+                                    )
+                                    print(
+                                        f"[Action Proposal] {proposal_data['type']}: {proposal_data['content']}"
+                                    )
+                            except Exception as exc:
                                 print(
-                                    f"[Action Proposal] {proposal_data['type']}: {proposal_data['content']}"
+                                    f"[Vexa] Ollama analysis failed for chunk: {exc}"
                                 )
-                        except Exception as exc:
-                            print(
-                                f"[Vexa] Ollama analysis failed for chunk {c.id}: {exc}"
-                            )
+                        
+                        # Dispatch LLM analysis to the background so it doesn't block the next transcript fetch
+                        asyncio.create_task(_process_chunk_summary(c.text, meeting_id))
         except Exception as exc:
             print(f"[Vexa] Transcript poll failed for meeting {meeting_id}: {exc}")
 

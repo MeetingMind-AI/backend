@@ -54,6 +54,8 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speakers JSONB"))
+        conn.execute(text("ALTER TABLE agent_actions ADD COLUMN IF NOT EXISTS assignee_id INTEGER"))
+        conn.execute(text("ALTER TABLE agent_actions ADD COLUMN IF NOT EXISTS tags JSONB"))
         conn.execute(text("""
             DO $$
             BEGIN
