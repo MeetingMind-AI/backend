@@ -861,7 +861,12 @@ class ControllerAgent:
         if not transcript:
             msg = "## Summary\nNo transcript content available."
             print(f"[Final Report] meeting={meeting_id}\n{msg}\n")
-            return msg
+            fallback_report = {"scrum_master": {"summary": "No transcript content available."}}
+            try:
+                self._persist(db_session, meeting_id, fallback_report, [])
+            except Exception as exc:
+                print(f"[Final Report] Failed to persist empty report: {exc}")
+            return json.dumps(fallback_report)
 
         # 2. Initial analysis: Tech Lead + Product Manager (parallel)
         base_prompt = (
