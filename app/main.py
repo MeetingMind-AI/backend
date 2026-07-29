@@ -754,6 +754,7 @@ def list_all_actions(
             "parking_lot": {"pending": [], "accepted": [], "rejected": []},
             "to_do": {"pending": [], "accepted": [], "rejected": []},
             "to_schedule": {"pending": [], "accepted": [], "rejected": []},
+            "blocker": {"pending": [], "accepted": [], "rejected": []},
         }
         for a, m_title, m_created, u in rows:
             if a.action_type not in grouped:
@@ -810,13 +811,10 @@ def list_actions(
             "parking_lot": {"pending": [], "accepted": [], "rejected": []},
             "to_do": {"pending": [], "accepted": [], "rejected": []},
             "to_schedule": {"pending": [], "accepted": [], "rejected": []},
+            "blocker": {"pending": [], "accepted": [], "rejected": []},
         }
         for a, u in rows:
-            t = (
-                a.action_type
-                if a.action_type not in ("blocker", "conflict")
-                else "parking_lot"
-            )
+            t = a.action_type
             if t not in grouped:
                 continue
             entry = {

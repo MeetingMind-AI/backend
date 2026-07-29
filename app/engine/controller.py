@@ -200,6 +200,27 @@ def get_memory() -> Memory | None:
 MEM0_SAVE_ENABLED = _env_bool("MEM0_SAVE_ENABLED", True)
 MEM0_SEARCH_ENABLED = _env_bool("MEM0_SEARCH_ENABLED", True)
 
+# Module-level semaphore shared across all ControllerAgent instances.
+# Ensures that real-time summarize() calls and on-demand Instant Clarity calls
+# never race against each other when hitting the (single-threaded) Ollama backend.
+_llm_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    """Lazily initialise the shared LLM semaphore on the running event loop.
+
+    asyncio.Semaphore must be created on the same event loop it is used on;
+    using a module-level singleton created at import time fails in some ASGI
+    environments.  Lazy init is therefore the safest approach.
+
+    Returns:
+        asyncio.Semaphore: Shared concurrency gate (limit=1) for all Ollama calls.
+    """
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        _llm_semaphore = asyncio.Semaphore(1)
+    return _llm_semaphore
+
 
 class OllamaClient:
     """Async client wrapper for interacting with Ollama generate API endpoints."""
@@ -586,7 +607,6 @@ class ControllerAgent:
             final_model=final_model,
             timeout=timeout,
         )
-        self._llm_semaphore = asyncio.Semaphore(1)
         self._discussion = DiscussionEngine(self._llm)
         self._pre_meeting_context = ""
 
@@ -690,7 +710,7 @@ class ControllerAgent:
                 tuple[str, dict]: Tuple of (role, summary_dict).
             """
             try:
-                async with self._llm_semaphore:
+                async with _get_llm_semaphore():
                     raw = await self._llm.generate(
                         prompt=prompt,
                         system_prompt=sys_prompt,
