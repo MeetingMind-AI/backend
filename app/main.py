@@ -31,8 +31,10 @@ from app.db.base import Base
 from app.db.models import AgentAction, Meeting, Session, TeamMembership, TranscriptChunk, meeting_topics, User
 from app.db.session import SessionLocal, engine
 from app.engine.controller import ControllerAgent
+from app.engine.email_service import build_email_html, send_meeting_email
 from app.engine.vexa_client import (
     TERMINAL_MEETING_STATUSES,
+    _finalizing,
     poll_transcripts_from_vexa,
     monitor_meeting_until_terminal,
     sync_final_transcript_from_vexa,
@@ -389,36 +391,87 @@ async def leave_meeting(
 async def _finalize_meeting(
     meeting_id: int, platform: str, native_id: str, api_key: str
 ) -> None:
-    """Async background task for final transcript sync, speaker sync, and report generation.
+    if meeting_id in _finalizing:
+        print(f"[Leave] Finalization already running for meeting {meeting_id}; skipping")
+        return
+    _finalizing.add(meeting_id)
+    try:
+        update_meeting_status(meeting_id, "completed")
 
-    Args:
-        meeting_id (int): Primary key ID of the meeting.
-        platform (str): Platform name string.
-        native_id (str): Native meeting URL/ID.
-        api_key (str): Vexa API key.
-    """
-    update_meeting_status(meeting_id, "completed")
+        if platform and native_id and api_key:
+            try:
+                await sync_final_transcript_from_vexa(
+                    meeting_id, platform, native_id, api_key
+                )
+            except Exception as exc:
+                print(f"[Leave] Transcript sync failed: {exc}")
+            try:
+                await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
+            except Exception as exc:
+                print(f"[Leave] Speaker sync failed: {exc}")
 
-    if platform and native_id and api_key:
-        try:
-            await sync_final_transcript_from_vexa(
-                meeting_id, platform, native_id, api_key
-            )
-        except Exception as exc:
-            print(f"[Leave] Transcript sync failed: {exc}")
-        try:
-            await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
-        except Exception as exc:
-            print(f"[Leave] Speaker sync failed: {exc}")
+        with SessionLocal() as db:
+            meeting = db.get(Meeting, meeting_id)
+            team_id = meeting.team_id if meeting else None
+            controller = ControllerAgent()
+            try:
+                await controller.generate_final_report(meeting_id, db, team_id=team_id)
+            except Exception as exc:
+                print(f"[Leave] Failed to generate final report: {exc}")
+    finally:
+        _finalizing.discard(meeting_id)
 
+
+@app.post("/api/meetings/{meeting_id}/redispatch")
+async def redispatch_meeting(
+    meeting_id: int,
+    background_tasks: BackgroundTasks,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
-        team_id = meeting.team_id if meeting else None
-        controller = ControllerAgent()
-        try:
-            await controller.generate_final_report(meeting_id, db, team_id=team_id)
-        except Exception as exc:
-            print(f"[Leave] Failed to generate final report: {exc}")
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+
+    platform, native_id = _get_local_meeting_context(meeting_id)
+    if not platform or not native_id:
+        raise HTTPException(status_code=400, detail="Cannot determine meeting platform or native ID")
+
+    vexa_api_key = os.getenv("VEXA_API_KEY", "")
+    if not vexa_api_key:
+        raise HTTPException(status_code=500, detail="VEXA_API_KEY is not configured")
+
+    headers = {"X-API-Key": vexa_api_key, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            bot_response = await client.post(
+                "http://host.docker.internal:8056/bots",
+                json={"platform": platform, "native_meeting_id": native_id, "transcribe_enabled": True},
+                headers=headers,
+            )
+        bot_response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=exc.response.text or "Failed to redeploy Vexa bot",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to contact Vexa bot service: {exc}"
+        ) from exc
+
+    update_meeting_status(meeting_id, "requested")
+
+    async def run_meeting_tasks():
+        await asyncio.gather(
+            poll_transcripts_from_vexa(meeting_id, platform, native_id, vexa_api_key, ws_manager=manager),
+            monitor_meeting_until_terminal(meeting_id, platform, native_id, vexa_api_key),
+        )
+
+    background_tasks.add_task(run_meeting_tasks)
+    return {"ok": True, "status": "requested"}
 
 
 @app.post("/api/meetings/{meeting_id}/explain")
@@ -1025,6 +1078,109 @@ def create_action(
                 "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None
             } if u else None
         }
+
+
+class EmailSendRequest(BaseModel):
+    recipient_ids: list[int]
+
+
+def _build_actions_dict(db: Any, meeting_id: int) -> dict[str, Any]:
+    rows = db.execute(
+        select(AgentAction, User)
+        .outerjoin(User, AgentAction.assignee_id == User.id)
+        .where(AgentAction.meeting_id == meeting_id)
+        .order_by(AgentAction.id.desc())
+    ).all()
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
+        "parking_lot": {"pending": [], "accepted": [], "rejected": []},
+        "to_do": {"pending": [], "accepted": [], "rejected": []},
+        "to_schedule": {"pending": [], "accepted": [], "rejected": []},
+        "blocker": {"pending": [], "accepted": [], "rejected": []},
+    }
+    for a, u in rows:
+        t = a.action_type
+        if t not in grouped:
+            continue
+        entry: dict[str, Any] = {
+            "id": a.id,
+            "agent_role": a.agent_role,
+            "action_type": t,
+            "content": a.content,
+            "status": a.status,
+            "tags": a.tags or [],
+            "assignee": {
+                "id": u.id,
+                "name": u.name,
+                "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None,
+            } if u else None,
+        }
+        bucket = "accepted" if a.status == "accepted" else ("rejected" if a.status == "rejected" else "pending")
+        grouped[t][bucket].append(entry)
+    return grouped
+
+
+@app.get("/api/meetings/{meeting_id}/email-preview")
+def get_email_preview(
+    meeting_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+        meeting_dict = {
+            "title": meeting.title,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+            "summary": meeting.summary,
+            "speakers": meeting.speakers or [],
+        }
+        actions_dict = _build_actions_dict(db, meeting_id)
+    html = build_email_html(meeting_dict, actions_dict)
+    return {"html": html}
+
+
+@app.post("/api/meetings/{meeting_id}/send-email")
+async def send_email(
+    meeting_id: int,
+    request: EmailSendRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+        meeting_dict = {
+            "title": meeting.title,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+            "summary": meeting.summary,
+            "speakers": meeting.speakers or [],
+        }
+        actions_dict = _build_actions_dict(db, meeting_id)
+        recipients = db.execute(
+            select(User).where(User.id.in_(request.recipient_ids))
+        ).scalars().all()
+        to_emails = [u.email for u in recipients if u.email]
+
+    if not to_emails:
+        raise HTTPException(status_code=400, detail="No valid recipient emails found")
+
+    raw_title = meeting_dict["title"]
+    title = ":".join(raw_title.split(":")[1:]) if ":" in raw_title else raw_title
+    subject = f"Meeting Report — {title}"
+    html = build_email_html(meeting_dict, actions_dict)
+
+    try:
+        await send_meeting_email(to_emails, subject, html)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to send email: {exc}") from exc
+
+    return {"ok": True, "sent_to": to_emails}
 
 
 @app.get("/health", tags=["health"])
