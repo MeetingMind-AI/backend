@@ -31,6 +31,7 @@ from app.db.base import Base
 from app.db.models import AgentAction, Meeting, Session, TeamMembership, TranscriptChunk, meeting_topics, User
 from app.db.session import SessionLocal, engine
 from app.engine.controller import ControllerAgent
+from app.engine.email_service import build_email_html, send_meeting_email
 from app.engine.vexa_client import (
     TERMINAL_MEETING_STATUSES,
     _finalizing,
@@ -1077,6 +1078,109 @@ def create_action(
                 "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None
             } if u else None
         }
+
+
+class EmailSendRequest(BaseModel):
+    recipient_ids: list[int]
+
+
+def _build_actions_dict(db: Any, meeting_id: int) -> dict[str, Any]:
+    rows = db.execute(
+        select(AgentAction, User)
+        .outerjoin(User, AgentAction.assignee_id == User.id)
+        .where(AgentAction.meeting_id == meeting_id)
+        .order_by(AgentAction.id.desc())
+    ).all()
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
+        "parking_lot": {"pending": [], "accepted": [], "rejected": []},
+        "to_do": {"pending": [], "accepted": [], "rejected": []},
+        "to_schedule": {"pending": [], "accepted": [], "rejected": []},
+        "blocker": {"pending": [], "accepted": [], "rejected": []},
+    }
+    for a, u in rows:
+        t = a.action_type
+        if t not in grouped:
+            continue
+        entry: dict[str, Any] = {
+            "id": a.id,
+            "agent_role": a.agent_role,
+            "action_type": t,
+            "content": a.content,
+            "status": a.status,
+            "tags": a.tags or [],
+            "assignee": {
+                "id": u.id,
+                "name": u.name,
+                "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None,
+            } if u else None,
+        }
+        bucket = "accepted" if a.status == "accepted" else ("rejected" if a.status == "rejected" else "pending")
+        grouped[t][bucket].append(entry)
+    return grouped
+
+
+@app.get("/api/meetings/{meeting_id}/email-preview")
+def get_email_preview(
+    meeting_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+        meeting_dict = {
+            "title": meeting.title,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+            "summary": meeting.summary,
+            "speakers": meeting.speakers or [],
+        }
+        actions_dict = _build_actions_dict(db, meeting_id)
+    html = build_email_html(meeting_dict, actions_dict)
+    return {"html": html}
+
+
+@app.post("/api/meetings/{meeting_id}/send-email")
+async def send_email(
+    meeting_id: int,
+    request: EmailSendRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+        meeting_dict = {
+            "title": meeting.title,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+            "summary": meeting.summary,
+            "speakers": meeting.speakers or [],
+        }
+        actions_dict = _build_actions_dict(db, meeting_id)
+        recipients = db.execute(
+            select(User).where(User.id.in_(request.recipient_ids))
+        ).scalars().all()
+        to_emails = [u.email for u in recipients if u.email]
+
+    if not to_emails:
+        raise HTTPException(status_code=400, detail="No valid recipient emails found")
+
+    raw_title = meeting_dict["title"]
+    title = ":".join(raw_title.split(":")[1:]) if ":" in raw_title else raw_title
+    subject = f"Meeting Report — {title}"
+    html = build_email_html(meeting_dict, actions_dict)
+
+    try:
+        await send_meeting_email(to_emails, subject, html)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to send email: {exc}") from exc
+
+    return {"ok": True, "sent_to": to_emails}
 
 
 @app.get("/health", tags=["health"])
