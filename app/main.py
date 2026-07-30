@@ -33,6 +33,7 @@ from app.db.session import SessionLocal, engine
 from app.engine.controller import ControllerAgent
 from app.engine.vexa_client import (
     TERMINAL_MEETING_STATUSES,
+    _finalizing,
     poll_transcripts_from_vexa,
     monitor_meeting_until_terminal,
     sync_final_transcript_from_vexa,
@@ -389,36 +390,87 @@ async def leave_meeting(
 async def _finalize_meeting(
     meeting_id: int, platform: str, native_id: str, api_key: str
 ) -> None:
-    """Async background task for final transcript sync, speaker sync, and report generation.
+    if meeting_id in _finalizing:
+        print(f"[Leave] Finalization already running for meeting {meeting_id}; skipping")
+        return
+    _finalizing.add(meeting_id)
+    try:
+        update_meeting_status(meeting_id, "completed")
 
-    Args:
-        meeting_id (int): Primary key ID of the meeting.
-        platform (str): Platform name string.
-        native_id (str): Native meeting URL/ID.
-        api_key (str): Vexa API key.
-    """
-    update_meeting_status(meeting_id, "completed")
+        if platform and native_id and api_key:
+            try:
+                await sync_final_transcript_from_vexa(
+                    meeting_id, platform, native_id, api_key
+                )
+            except Exception as exc:
+                print(f"[Leave] Transcript sync failed: {exc}")
+            try:
+                await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
+            except Exception as exc:
+                print(f"[Leave] Speaker sync failed: {exc}")
 
-    if platform and native_id and api_key:
-        try:
-            await sync_final_transcript_from_vexa(
-                meeting_id, platform, native_id, api_key
-            )
-        except Exception as exc:
-            print(f"[Leave] Transcript sync failed: {exc}")
-        try:
-            await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
-        except Exception as exc:
-            print(f"[Leave] Speaker sync failed: {exc}")
+        with SessionLocal() as db:
+            meeting = db.get(Meeting, meeting_id)
+            team_id = meeting.team_id if meeting else None
+            controller = ControllerAgent()
+            try:
+                await controller.generate_final_report(meeting_id, db, team_id=team_id)
+            except Exception as exc:
+                print(f"[Leave] Failed to generate final report: {exc}")
+    finally:
+        _finalizing.discard(meeting_id)
 
+
+@app.post("/api/meetings/{meeting_id}/redispatch")
+async def redispatch_meeting(
+    meeting_id: int,
+    background_tasks: BackgroundTasks,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
-        team_id = meeting.team_id if meeting else None
-        controller = ControllerAgent()
-        try:
-            await controller.generate_final_report(meeting_id, db, team_id=team_id)
-        except Exception as exc:
-            print(f"[Leave] Failed to generate final report: {exc}")
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+
+    platform, native_id = _get_local_meeting_context(meeting_id)
+    if not platform or not native_id:
+        raise HTTPException(status_code=400, detail="Cannot determine meeting platform or native ID")
+
+    vexa_api_key = os.getenv("VEXA_API_KEY", "")
+    if not vexa_api_key:
+        raise HTTPException(status_code=500, detail="VEXA_API_KEY is not configured")
+
+    headers = {"X-API-Key": vexa_api_key, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            bot_response = await client.post(
+                "http://host.docker.internal:8056/bots",
+                json={"platform": platform, "native_meeting_id": native_id, "transcribe_enabled": True},
+                headers=headers,
+            )
+        bot_response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=exc.response.text or "Failed to redeploy Vexa bot",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to contact Vexa bot service: {exc}"
+        ) from exc
+
+    update_meeting_status(meeting_id, "requested")
+
+    async def run_meeting_tasks():
+        await asyncio.gather(
+            poll_transcripts_from_vexa(meeting_id, platform, native_id, vexa_api_key, ws_manager=manager),
+            monitor_meeting_until_terminal(meeting_id, platform, native_id, vexa_api_key),
+        )
+
+    background_tasks.add_task(run_meeting_tasks)
+    return {"ok": True, "status": "requested"}
 
 
 @app.post("/api/meetings/{meeting_id}/explain")

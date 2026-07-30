@@ -30,6 +30,7 @@ FINALIZATION_PROGRESS_INTERVAL_SECONDS = 5
 SYSTEM_PARTICIPANT_NAMES = {"meeting audio"}
 
 _seen_chunk_sigs: dict[int, set[str]] = {}
+_finalizing: set[int] = set()
 
 
 def _get_chunk_sigs(meeting_id: int) -> set[str]:
@@ -189,16 +190,12 @@ async def _finalize_completed_meeting(
     api_key: str,
     source: str,
 ) -> None:
-    """Coordinate final transcript sync, speaker list sync, and final report generation for a completed meeting.
+    if meeting_id in _finalizing:
+        print(f"[Vexa] Finalization already in progress for meeting {meeting_id}; skipping ({source})")
+        return
+    _finalizing.add(meeting_id)
 
-    Args:
-        controller (ControllerAgent): ControllerAgent orchestrator instance.
-        meeting_id (int): Primary key ID of target meeting.
-        platform (str): Meeting platform name (e.g. 'google_meet', 'teams', 'zoom').
-        native_id (str): Native meeting URL or code.
-        api_key (str): Vexa API key string.
-        source (str): Trigger source string.
-    """
+
     print(f"[Vexa] Starting finalization for meeting {meeting_id} (source={source})")
     progress_done = asyncio.Event()
     progress_task = asyncio.create_task(
@@ -221,6 +218,7 @@ async def _finalize_completed_meeting(
     finally:
         progress_done.set()
         await progress_task
+        _finalizing.discard(meeting_id)
 
     duration = round(time.monotonic() - started, 2)
     print(f"[Vexa] Finalization complete for meeting {meeting_id} in {duration}s")
@@ -567,33 +565,94 @@ async def monitor_meeting_until_terminal(
 
     base_url = _vexa_api_base_url()
     meetings_url = f"{base_url}/meetings"
-    poll_interval = int(os.getenv("VEXA_MEETING_POLL_INTERVAL_SECONDS", "10"))
+    bot_url = f"{base_url}/bots/{platform}/{native_id}"
+    poll_interval = int(os.getenv("VEXA_MEETING_POLL_INTERVAL_SECONDS", "5"))
     if poll_interval < 3:
         poll_interval = 3
 
     deadline = time.monotonic() + max(timeout_seconds, poll_interval)
     controller = ControllerAgent()
+    seen_in_vexa = False
+    consecutive_not_found = 0
     while time.monotonic() < deadline:
         if _is_local_meeting_terminal(meeting_id):
             return
 
+        headers = {"X-API-Key": vexa_api_key}
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(
-                    meetings_url, headers={"X-API-Key": vexa_api_key}
+                meetings_result, bot_result = await asyncio.gather(
+                    client.get(meetings_url, headers=headers),
+                    client.get(bot_url, headers=headers),
+                    return_exceptions=True,
                 )
-            response.raise_for_status()
-            payload: Any = response.json() if response.content else {}
+        except Exception as exc:
+            print(f"[Vexa] Poll gather failed for meeting {meeting_id}: {exc}")
+            await asyncio.sleep(poll_interval)
+            continue
+
+        # Fast path: if the bot endpoint returns 404 the bot was removed
+        if (
+            isinstance(bot_result, httpx.Response)
+            and bot_result.status_code == 404
+            and seen_in_vexa
+        ):
+            print(
+                f"[Vexa] Bot 404 for meeting {meeting_id} after being seen; treating as completed"
+            )
+            update_meeting_status(meeting_id, "completed")
+            await _finalize_completed_meeting(
+                controller=controller,
+                meeting_id=meeting_id,
+                platform=platform,
+                native_id=native_id,
+                api_key=vexa_api_key,
+                source="poller-bot-404",
+            )
+            return
+
+        # Meetings endpoint check
+        if not isinstance(meetings_result, httpx.Response):
+            print(f"[Vexa] Meeting poll failed for meeting {meeting_id}: {meetings_result}")
+            await asyncio.sleep(poll_interval)
+            continue
+
+        try:
+            meetings_result.raise_for_status()
+            payload: Any = meetings_result.json() if meetings_result.content else {}
         except httpx.HTTPError as exc:
-            print(f"[Vexa] Meeting poll failed for meeting {meeting_id}: {exc}")
+            print(f"[Vexa] Meeting poll HTTP error for meeting {meeting_id}: {exc}")
             await asyncio.sleep(poll_interval)
             continue
 
         remote_meeting = _extract_latest_remote_meeting(payload, platform, native_id)
         if not remote_meeting:
+            if seen_in_vexa:
+                consecutive_not_found += 1
+                print(
+                    f"[Vexa] Meeting {meeting_id} not found in Vexa list "
+                    f"(consecutive={consecutive_not_found})"
+                )
+                if consecutive_not_found >= 2:
+                    print(
+                        f"[Vexa] Meeting {meeting_id} disappeared from Vexa after "
+                        f"{consecutive_not_found} polls; treating as completed"
+                    )
+                    update_meeting_status(meeting_id, "completed")
+                    await _finalize_completed_meeting(
+                        controller=controller,
+                        meeting_id=meeting_id,
+                        platform=platform,
+                        native_id=native_id,
+                        api_key=vexa_api_key,
+                        source="poller-disappear",
+                    )
+                    return
             await asyncio.sleep(poll_interval)
             continue
 
+        seen_in_vexa = True
+        consecutive_not_found = 0
         status_value = str(remote_meeting.get("status", "")).strip().lower()
         if status_value:
             update_meeting_status(meeting_id, status_value)
