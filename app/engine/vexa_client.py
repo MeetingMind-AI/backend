@@ -1,3 +1,8 @@
+from __future__ import annotations
+import logging
+
+logger = logging.getLogger(__name__)
+
 """
 Vexa API Integration and Transcript Sync Engine Module.
 
@@ -6,7 +11,6 @@ transcript segment synchronization, speaker list extraction, real-time broadcast
 and automatic final report generation upon meeting completion.
 """
 
-from __future__ import annotations
 
 import asyncio
 import json
@@ -169,7 +173,7 @@ async def _emit_finalization_progress(
     """
     elapsed = 0
     while not done.is_set():
-        print(
+        logger.info(
             f"[Vexa] Finalization in progress for meeting {meeting_id} "
             f"(source={source}, elapsed={elapsed}s)"
         )
@@ -191,12 +195,12 @@ async def _finalize_completed_meeting(
     source: str,
 ) -> None:
     if meeting_id in _finalizing:
-        print(f"[Vexa] Finalization already in progress for meeting {meeting_id}; skipping ({source})")
+        logger.info(f"[Vexa] Finalization already in progress for meeting {meeting_id}; skipping ({source})")
         return
     _finalizing.add(meeting_id)
 
 
-    print(f"[Vexa] Starting finalization for meeting {meeting_id} (source={source})")
+    logger.info(f"[Vexa] Starting finalization for meeting {meeting_id} (source={source})")
     progress_done = asyncio.Event()
     progress_task = asyncio.create_task(
         _emit_finalization_progress(meeting_id, progress_done, source)
@@ -210,7 +214,7 @@ async def _finalize_completed_meeting(
             native_id=native_id,
             api_key=api_key,
         )
-        print(
+        logger.info(
             f"[Vexa] Final transcript sync for meeting {meeting_id} upserted {upserted} chunks"
         )
         await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
@@ -221,7 +225,7 @@ async def _finalize_completed_meeting(
         _finalizing.discard(meeting_id)
 
     duration = round(time.monotonic() - started, 2)
-    print(f"[Vexa] Finalization complete for meeting {meeting_id} in {duration}s")
+    logger.info(f"[Vexa] Finalization complete for meeting {meeting_id} in {duration}s")
 
 
 async def _generate_and_log_final_report(
@@ -239,7 +243,7 @@ async def _generate_and_log_final_report(
             team_id = meeting.team_id if meeting else None
             await controller.generate_final_report(meeting_id, db, team_id=team_id)
         except Exception as exc:  # noqa: BLE001
-            print(
+            logger.info(
                 f"[Vexa] Failed to generate final report for meeting {meeting_id}: {type(exc).__name__}: {str(exc)}"
             )
 
@@ -335,7 +339,7 @@ def update_meeting_status(meeting_id: int, status_value: str) -> None:
             db.commit()
         except SQLAlchemyError as exc:
             db.rollback()
-            print(f"[Vexa] Failed to update meeting status for {meeting_id}: {exc}")
+            logger.info(f"[Vexa] Failed to update meeting status for {meeting_id}: {exc}")
 
 
 def _filter_speakers(raw: list[Any]) -> list[str]:
@@ -387,19 +391,19 @@ async def sync_speakers_from_vexa(
             response.raise_for_status()
             payload: Any = response.json() if response.content else {}
         except httpx.HTTPError as exc:
-            print(f"[Vexa] Speaker sync attempt {attempt} failed for meeting {meeting_id}: {exc}")
+            logger.info(f"[Vexa] Speaker sync attempt {attempt} failed for meeting {meeting_id}: {exc}")
             continue
 
         remote_meeting = _extract_latest_remote_meeting(payload, platform, native_id)
         if not remote_meeting:
-            print(f"[Vexa] Speaker sync attempt {attempt}: meeting {meeting_id} not found in Vexa yet")
+            logger.info(f"[Vexa] Speaker sync attempt {attempt}: meeting {meeting_id} not found in Vexa yet")
             continue
 
         raw = remote_meeting.get("data", {}).get("participants", [])
         speakers = _filter_speakers(raw if isinstance(raw, list) else [])
 
         if not speakers:
-            print(f"[Vexa] Speaker sync attempt {attempt}: no speakers yet for meeting {meeting_id}")
+            logger.info(f"[Vexa] Speaker sync attempt {attempt}: no speakers yet for meeting {meeting_id}")
             continue
 
         with SessionLocal() as db:
@@ -408,13 +412,13 @@ async def sync_speakers_from_vexa(
                 meeting.speakers = speakers
                 try:
                     db.commit()
-                    print(f"[Vexa] Synced {len(speakers)} speakers for meeting {meeting_id}: {speakers}")
+                    logger.info(f"[Vexa] Synced {len(speakers)} speakers for meeting {meeting_id}: {speakers}")
                 except SQLAlchemyError as exc:
                     db.rollback()
-                    print(f"[Vexa] Failed to persist speakers for meeting {meeting_id}: {exc}")
+                    logger.info(f"[Vexa] Failed to persist speakers for meeting {meeting_id}: {exc}")
         return speakers
 
-    print(f"[Vexa] Speaker sync exhausted all retries for meeting {meeting_id}")
+    logger.info(f"[Vexa] Speaker sync exhausted all retries for meeting {meeting_id}")
     return []
 
 
@@ -437,7 +441,7 @@ async def sync_final_transcript_from_vexa(
     """
     vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
     if not vexa_api_key:
-        print(
+        logger.info(
             f"[Vexa] Cannot sync final transcript for meeting {meeting_id}: missing API key"
         )
         return 0
@@ -451,7 +455,7 @@ async def sync_final_transcript_from_vexa(
         response.raise_for_status()
         payload: Any = response.json() if response.content else {}
     except httpx.HTTPError as exc:
-        print(
+        logger.info(
             f"[Vexa] Failed to fetch final transcript for meeting {meeting_id}: {exc}"
         )
         return 0
@@ -489,7 +493,7 @@ async def sync_final_transcript_from_vexa(
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
         if meeting is None:
-            print(
+            logger.info(
                 f"[Vexa] Local meeting {meeting_id} not found during final transcript sync"
             )
             return 0
@@ -525,7 +529,7 @@ async def sync_final_transcript_from_vexa(
             )
             db.add_all(new_chunks)
         else:
-            print(
+            logger.info(
                 f"[Vexa] No canonical segments from Vexa for meeting {meeting_id}; "
                 "preserving existing transcript chunks"
             )
@@ -534,7 +538,7 @@ async def sync_final_transcript_from_vexa(
             db.commit()
         except SQLAlchemyError as exc:
             db.rollback()
-            print(
+            logger.info(
                 f"[Vexa] Failed to persist final transcript for meeting {meeting_id}: {exc}"
             )
             return 0
@@ -560,7 +564,7 @@ async def monitor_meeting_until_terminal(
     """
     vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
     if not vexa_api_key:
-        print(f"[Vexa] Cannot poll meeting lifecycle for {meeting_id}: missing API key")
+        logger.info(f"[Vexa] Cannot poll meeting lifecycle for {meeting_id}: missing API key")
         return
 
     base_url = _vexa_api_base_url()
@@ -587,7 +591,7 @@ async def monitor_meeting_until_terminal(
                     return_exceptions=True,
                 )
         except Exception as exc:
-            print(f"[Vexa] Poll gather failed for meeting {meeting_id}: {exc}")
+            logger.info(f"[Vexa] Poll gather failed for meeting {meeting_id}: {exc}")
             await asyncio.sleep(poll_interval)
             continue
 
@@ -597,7 +601,7 @@ async def monitor_meeting_until_terminal(
             and bot_result.status_code == 404
             and seen_in_vexa
         ):
-            print(
+            logger.info(
                 f"[Vexa] Bot 404 for meeting {meeting_id} after being seen; treating as completed"
             )
             update_meeting_status(meeting_id, "completed")
@@ -613,7 +617,7 @@ async def monitor_meeting_until_terminal(
 
         # Meetings endpoint check
         if not isinstance(meetings_result, httpx.Response):
-            print(f"[Vexa] Meeting poll failed for meeting {meeting_id}: {meetings_result}")
+            logger.info(f"[Vexa] Meeting poll failed for meeting {meeting_id}: {meetings_result}")
             await asyncio.sleep(poll_interval)
             continue
 
@@ -621,7 +625,7 @@ async def monitor_meeting_until_terminal(
             meetings_result.raise_for_status()
             payload: Any = meetings_result.json() if meetings_result.content else {}
         except httpx.HTTPError as exc:
-            print(f"[Vexa] Meeting poll HTTP error for meeting {meeting_id}: {exc}")
+            logger.info(f"[Vexa] Meeting poll HTTP error for meeting {meeting_id}: {exc}")
             await asyncio.sleep(poll_interval)
             continue
 
@@ -629,12 +633,12 @@ async def monitor_meeting_until_terminal(
         if not remote_meeting:
             if seen_in_vexa:
                 consecutive_not_found += 1
-                print(
+                logger.info(
                     f"[Vexa] Meeting {meeting_id} not found in Vexa list "
                     f"(consecutive={consecutive_not_found})"
                 )
                 if consecutive_not_found >= 2:
-                    print(
+                    logger.info(
                         f"[Vexa] Meeting {meeting_id} disappeared from Vexa after "
                         f"{consecutive_not_found} polls; treating as completed"
                     )
@@ -671,7 +675,7 @@ async def monitor_meeting_until_terminal(
 
         await asyncio.sleep(poll_interval)
 
-    print(
+    logger.info(
         f"[Vexa] Meeting poll timeout for meeting {meeting_id} after {timeout_seconds}s"
     )
 
@@ -696,7 +700,7 @@ async def poll_transcripts_from_vexa(
     """
     vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
     if not vexa_api_key:
-        print(
+        logger.info(
             f"[Vexa] VEXA_API_KEY is missing; transcript polling disabled for meeting {meeting_id}"
         )
         return
@@ -719,7 +723,7 @@ async def poll_transcripts_from_vexa(
                 api_key=vexa_api_key,
             )
             if upserted > 0:
-                print(
+                logger.info(
                     f"[Vexa] Synced {upserted} clean transcript segments for meeting {meeting_id}"
                 )
 
@@ -819,20 +823,20 @@ async def poll_transcripts_from_vexa(
                                             },
                                         },
                                     )
-                                    print(
+                                    logger.info(
                                         f"[Action Proposal] {proposal_data['type']}: {proposal_data['content']}"
                                     )
                             except Exception as exc:
-                                print(
+                                logger.info(
                                     f"[Vexa] Ollama analysis failed for chunk: {exc}"
                                 )
                         
                         # Dispatch LLM analysis to the background so it doesn't block the next transcript fetch
                         asyncio.create_task(_process_chunk_summary(c.text, meeting_id))
         except Exception as exc:
-            print(f"[Vexa] Transcript poll failed for meeting {meeting_id}: {exc}")
+            logger.info(f"[Vexa] Transcript poll failed for meeting {meeting_id}: {exc}")
 
         await asyncio.sleep(poll_interval)
 
-    print(f"[Vexa] Meeting {meeting_id} is terminal; stopping transcript polling")
+    logger.info(f"[Vexa] Meeting {meeting_id} is terminal; stopping transcript polling")
 

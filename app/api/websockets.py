@@ -1,3 +1,8 @@
+from __future__ import annotations
+import logging
+
+logger = logging.getLogger(__name__)
+
 """
 WebSocket Real-Time Transcript Ingestion API Module.
 
@@ -6,7 +11,6 @@ broadcasting transcript snapshots and live updates to connected web clients,
 and triggering real-time LLM summarization and action item proposals.
 """
 
-from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
@@ -107,7 +111,7 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
                 meeting = db.get(Meeting, meeting_id)
 
                 if meeting is None:
-                    print(
+                    logger.info(
                         f"Meeting {meeting_id} not found. Auto-creating it for test..."
                     )
                     meeting = Meeting(
@@ -133,7 +137,7 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
                     db.refresh(chunk)
                 except SQLAlchemyError as e:
                     db.rollback()
-                    print(f"DB Error: {e}")
+                    logger.info(f"DB Error: {e}")
                     await manager.broadcast(
                         meeting_id,
                         {
@@ -172,9 +176,9 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
                     existing_actions=pending_rows,
                     team_prompts=team_prompts,
                 )
-                print(f"[Ollama Result] {speaker}: {result}")
+                logger.info(f"[Ollama Result] {speaker}: {result}")
             except Exception as exc:
-                print(f"Ollama Error: {exc}")
+                logger.info(f"Ollama Error: {exc}")
                 await manager.broadcast(
                     meeting_id,
                     {
@@ -220,11 +224,11 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
                         },
                     },
                 )
-                print(
+                logger.info(
                     f"[Action Proposal] {proposal_data['type']}: {proposal_data['content']}"
                 )
 
     except WebSocketDisconnect:
-        print(f"WebSocket disconnected for meeting {meeting_id}")
+        logger.info(f"WebSocket disconnected for meeting {meeting_id}")
     finally:
         manager.disconnect(meeting_id, websocket)

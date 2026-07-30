@@ -1,3 +1,7 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 """
 Mem0 Memory Integration Test Script.
 
@@ -43,7 +47,7 @@ def _parse_transcript_line(line: str) -> tuple[str, str]:
 async def main() -> None:
     """Execute end-to-end integration test for summarization, report generation, and Mem0 memory."""
 
-    print("Starting Memory Integration Test...")
+    logger.info("Starting Memory Integration Test...")
 
     with SessionLocal() as db:
         meeting = Meeting(
@@ -55,10 +59,10 @@ async def main() -> None:
         db.add(meeting)
         db.commit()
         db.refresh(meeting)
-        print(f"Created mock meeting ID: {meeting.id}")
+        logger.info(f"Created mock meeting ID: {meeting.id}")
 
         agent = ControllerAgent()
-        print("\n--- Testing Real-Time Notifications ---")
+        logger.info("\n--- Testing Real-Time Notifications ---")
         start_time = datetime.now(timezone.utc)
         chunk_buffer: list[TranscriptChunk] = []
         for index, line in enumerate(MOCK_TRANSCRIPT):
@@ -73,17 +77,17 @@ async def main() -> None:
             )
             chunk_buffer.append(chunk)
 
-            print(f"\n[Incoming] {speaker}: {text}")
+            logger.info(f"\n[Incoming] {speaker}: {text}")
             try:
                 result = await agent.summarize(text)
             except Exception as exc:
-                print(f"Summarization failed: {exc}")
+                logger.info(f"Summarization failed: {exc}")
                 continue
 
             scrum = result.get("scrum_master", {})
             summary_text = str(scrum.get("text") or "").strip()
             if summary_text and summary_text.upper() != "IGNORE":
-                print(f"Insight: {summary_text}")
+                logger.info(f"Insight: {summary_text}")
 
             proposal_data = scrum.get("proposal")
             if proposal_data:
@@ -100,34 +104,34 @@ async def main() -> None:
                     db.add(action)
                     db.commit()
                     db.refresh(action)
-                    print(f"Notification: [{action_type.upper()}] {content}")
+                    logger.info(f"Notification: [{action_type.upper()}] {content}")
                 else:
-                    print("Notification skipped: proposal missing type/content.")
+                    logger.info("Notification skipped: proposal missing type/content.")
             else:
-                print("No notification generated.")
+                logger.info("No notification generated.")
 
         if chunk_buffer:
             db.add_all(chunk_buffer)
             db.commit()
-            print(
+            logger.info(
                 f"\n[Database] Batch inserted {len(chunk_buffer)} transcript chunks."
             )
 
-        print("\n--- Testing Final Report & Mem0 Save ---")
-        print("Generating final report and triggering Mem0 save...")
+        logger.info("\n--- Testing Final Report & Mem0 Save ---")
+        logger.info("Generating final report and triggering Mem0 save...")
         await agent.generate_final_report(meeting.id, db, team_id=meeting.team_id)
 
-    print("\n--- Testing Mem0 Retrieval ---")
+    logger.info("\n--- Testing Mem0 Retrieval ---")
     mem = get_memory()
     if mem is None:
-        print("Error: Mem0 is not initialized. Check MEM0_ENABLED environment variable.")
+        logger.info("Error: Mem0 is not initialized. Check MEM0_ENABLED environment variable.")
         return
 
     query = "What was the decision about the message broker?"
-    print(f"Querying Mem0: '{query}'")
+    logger.info(f"Querying Mem0: '{query}'")
     results = mem.search(query=query, filters={"user_id": "team_1"})
-    print("\nResults from Mem0:")
-    print(json.dumps(results, indent=2))
+    logger.info("\nResults from Mem0:")
+    logger.info(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,9 @@
+from __future__ import annotations
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
 """
 FastAPI Main Application and REST/WebSocket Gateway Module.
 
@@ -7,7 +13,6 @@ real-time transcript polling, Instant Clarity generation, Vexa webhook handling,
 action item management, and service health checks.
 """
 
-from __future__ import annotations
 
 import asyncio
 import os
@@ -374,7 +379,7 @@ async def leave_meeting(
                 )
             bot_response.raise_for_status()
         except httpx.HTTPError as exc:
-            print(f"[Leave] Failed to remove bot: {exc}")
+            logger.info(f"[Leave] Failed to remove bot: {exc}")
 
     background_tasks.add_task(
         _finalize_meeting, meeting_id, platform or "", native_id or "", vexa_api_key
@@ -392,7 +397,7 @@ async def _finalize_meeting(
     meeting_id: int, platform: str, native_id: str, api_key: str
 ) -> None:
     if meeting_id in _finalizing:
-        print(f"[Leave] Finalization already running for meeting {meeting_id}; skipping")
+        logger.info(f"[Leave] Finalization already running for meeting {meeting_id}; skipping")
         return
     _finalizing.add(meeting_id)
     try:
@@ -404,11 +409,11 @@ async def _finalize_meeting(
                     meeting_id, platform, native_id, api_key
                 )
             except Exception as exc:
-                print(f"[Leave] Transcript sync failed: {exc}")
+                logger.info(f"[Leave] Transcript sync failed: {exc}")
             try:
                 await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
             except Exception as exc:
-                print(f"[Leave] Speaker sync failed: {exc}")
+                logger.info(f"[Leave] Speaker sync failed: {exc}")
 
         with SessionLocal() as db:
             meeting = db.get(Meeting, meeting_id)
@@ -417,7 +422,7 @@ async def _finalize_meeting(
             try:
                 await controller.generate_final_report(meeting_id, db, team_id=team_id)
             except Exception as exc:
-                print(f"[Leave] Failed to generate final report: {exc}")
+                logger.info(f"[Leave] Failed to generate final report: {exc}")
     finally:
         _finalizing.discard(meeting_id)
 
