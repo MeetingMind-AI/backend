@@ -160,7 +160,6 @@ class TeamMembership(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     role: Mapped[str] = mapped_column(String(50), nullable=False, server_default=text("'member'"))
-    notification_tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="memberships")
     team: Mapped[Team] = relationship(back_populates="memberships")

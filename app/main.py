@@ -828,10 +828,10 @@ def list_all_actions(
         rows = db.execute(stmt).all()
 
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
-            "parking_lot": {"pending": [], "accepted": [], "rejected": []},
-            "to_do": {"pending": [], "accepted": [], "rejected": []},
-            "to_schedule": {"pending": [], "accepted": [], "rejected": []},
-            "blocker": {"pending": [], "accepted": [], "rejected": []},
+            "parking_lot": {"pending": [], "accepted": [], "rejected": [], "archived": []},
+            "to_do": {"pending": [], "accepted": [], "rejected": [], "archived": []},
+            "to_schedule": {"pending": [], "accepted": [], "rejected": [], "archived": []},
+            "blocker": {"pending": [], "accepted": [], "rejected": [], "archived": []},
         }
         for a, m_title, m_created, u in rows:
             if a.action_type not in grouped:
@@ -852,7 +852,7 @@ def list_all_actions(
                     "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None
                 } if u else None
             }
-            bucket = "accepted" if a.status == "accepted" else ("rejected" if a.status == "rejected" else "pending")
+            bucket = a.status if a.status in ["accepted", "rejected", "archived"] else "pending"
             grouped[a.action_type][bucket].append(entry)
         return grouped
 
@@ -885,10 +885,10 @@ def list_actions(
         ).all()
 
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
-            "parking_lot": {"pending": [], "accepted": [], "rejected": []},
-            "to_do": {"pending": [], "accepted": [], "rejected": []},
-            "to_schedule": {"pending": [], "accepted": [], "rejected": []},
-            "blocker": {"pending": [], "accepted": [], "rejected": []},
+            "parking_lot": {"pending": [], "accepted": [], "rejected": [], "archived": []},
+            "to_do": {"pending": [], "accepted": [], "rejected": [], "archived": []},
+            "to_schedule": {"pending": [], "accepted": [], "rejected": [], "archived": []},
+            "blocker": {"pending": [], "accepted": [], "rejected": [], "archived": []},
         }
         for a, u in rows:
             t = a.action_type
@@ -907,7 +907,7 @@ def list_actions(
                     "photo_url": f"/api/auth/photo/{u.id}" if u.photo else None
                 } if u else None
             }
-            bucket = "accepted" if a.status == "accepted" else ("rejected" if a.status == "rejected" else "pending")
+            bucket = a.status if a.status in ["accepted", "rejected", "archived"] else "pending"
             grouped[t][bucket].append(entry)
         return grouped
 
@@ -922,7 +922,7 @@ class ActionReviewRequest(BaseModel):
         action_type (str | None): Optional action category.
         tags (list[str] | None): Optional list of tags.
     """
-    status: str | None = Field(default=None, pattern="^(accepted|rejected|pending)$")
+    status: str | None = Field(default=None, pattern="^(accepted|rejected|pending|archived)$")
     content: str | None = None
     assignee_id: int | None = None
     action_type: str | None = Field(default=None, pattern="^(parking_lot|to_do|to_schedule)$")

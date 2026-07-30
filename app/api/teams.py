@@ -85,7 +85,6 @@ def _member_out(user: User, membership: TeamMembership) -> dict[str, Any]:
         "email": user.email,
         "photo_url": f"/api/auth/photo/{user.id}" if user.photo else None,
         "role": membership.role,
-        "notification_tags": membership.notification_tags or [],
     }
 
 
@@ -438,37 +437,31 @@ def kick_member(
         return {"ok": True}
 
 
-class MemberUpdateRequest(BaseModel):
-    """Member Role and Preferences Update Schema.
-
-    Attributes:
-        role (str | None): Optional new membership role string.
-        notification_tags (list[str] | None): Optional list of notification tags.
-    """
-    role: str | None = None
-    notification_tags: list[str] | None = None
+class TeamMemberUpdate(BaseModel):
+    """Payload for updating a member's role."""
+    role: str
 
 
 @router.patch("/api/teams/{team_id}/members/{target_user_id}")
 def update_member(
     team_id: int,
     target_user_id: int,
-    req: MemberUpdateRequest,
+    req: TeamMemberUpdate,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
-    """Update team member role or notification tag preferences.
+    """Update team member role.
 
     Args:
         team_id (int): Target team primary key ID.
         target_user_id (int): User ID of member being updated.
-        req (MemberUpdateRequest): Payload containing role or tags.
+        req (TeamMemberUpdate): Payload containing role.
         user_id (int): Authenticated user ID.
 
     Returns:
         dict[str, Any]: Updated member object.
 
     Raises:
-        HTTPException: 403 if non-owner attempts to update another member or role.
+        HTTPException: 403 if non-owner attempts to update role.
     """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
@@ -476,10 +469,8 @@ def update_member(
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
         
-        # Only owners can change roles or update other members' settings
-        if target_user_id != user_id and team.owner_id != user_id:
-            raise HTTPException(status_code=403, detail="Only team owners can update other members")
-        if req.role is not None and team.owner_id != user_id:
+        # Only owners can change roles
+        if team.owner_id != user_id:
             raise HTTPException(status_code=403, detail="Only team owners can change roles")
 
         membership = db.execute(
@@ -492,10 +483,8 @@ def update_member(
         if not membership:
             raise HTTPException(status_code=404, detail="Member not found")
             
-        if req.role is not None:
+        if req.role:
             membership.role = req.role
-        if req.notification_tags is not None:
-            membership.notification_tags = req.notification_tags
             
         db.commit()
         
