@@ -85,6 +85,7 @@ def _member_out(user: User, membership: TeamMembership) -> dict[str, Any]:
         "email": user.email,
         "photo_url": f"/api/auth/photo/{user.id}" if user.photo else None,
         "role": membership.role,
+        "notification_preferences": membership.notification_preferences or [],
     }
 
 
@@ -180,7 +181,12 @@ def create_team(
         )
         db.add(team)
         db.flush()
-        db.add(TeamMembership(user_id=user_id, team_id=team.id))
+        db.add(TeamMembership(
+            user_id=user_id,
+            team_id=team.id,
+            role="admin",
+            notification_preferences=["technical", "business"]
+        ))
         db.commit()
         db.refresh(team)
         return {
@@ -438,8 +444,9 @@ def kick_member(
 
 
 class TeamMemberUpdate(BaseModel):
-    """Payload for updating a member's role."""
-    role: str
+    """Payload for updating a member's role or preferences."""
+    role: str | None = None
+    notification_preferences: list[str] | None = None
 
 
 @router.patch("/api/teams/{team_id}/members/{target_user_id}")
@@ -470,8 +477,12 @@ def update_member(
             raise HTTPException(status_code=404, detail="Team not found")
         
         # Only owners can change roles
-        if team.owner_id != user_id:
+        if req.role is not None and team.owner_id != user_id:
             raise HTTPException(status_code=403, detail="Only team owners can change roles")
+            
+        # Only the user or owner can change notification preferences
+        if req.notification_preferences is not None and target_user_id != user_id and team.owner_id != user_id:
+            raise HTTPException(status_code=403, detail="Only the user or team owner can change notification preferences")
 
         membership = db.execute(
             select(TeamMembership).where(
@@ -483,8 +494,11 @@ def update_member(
         if not membership:
             raise HTTPException(status_code=404, detail="Member not found")
             
-        if req.role:
+        if req.role is not None:
             membership.role = req.role
+        
+        if req.notification_preferences is not None:
+            membership.notification_preferences = req.notification_preferences
             
         db.commit()
         
