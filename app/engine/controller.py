@@ -205,6 +205,13 @@ MEM0_SEARCH_ENABLED = _env_bool("MEM0_SEARCH_ENABLED", True)
 # never race against each other when hitting the (single-threaded) Ollama backend.
 _llm_semaphore: asyncio.Semaphore | None = None
 
+# Timeout for real-time summarize() LLM calls. If Ollama is loading models or
+# overloaded (e.g. CPU-only on Apple Silicon), this prevents the summary worker
+# from blocking indefinitely and losing queued transcript chunks.
+_LLM_SUMMARIZE_TIMEOUT: float = _env_float(
+    "OLLAMA_SUMMARIZE_TIMEOUT_SECONDS", 30.0
+) or 30.0
+
 
 def _get_llm_semaphore() -> asyncio.Semaphore:
     """Lazily initialise the shared LLM semaphore on the running event loop.
@@ -710,13 +717,19 @@ class ControllerAgent:
                 tuple[str, dict]: Tuple of (role, summary_dict).
             """
             try:
+                t0 = asyncio.get_event_loop().time()
                 async with _get_llm_semaphore():
-                    raw = await self._llm.generate(
-                        prompt=prompt,
-                        system_prompt=sys_prompt,
-                        json_mode=True,
-                        model=self._llm.model,
+                    raw = await asyncio.wait_for(
+                        self._llm.generate(
+                            prompt=prompt,
+                            system_prompt=sys_prompt,
+                            json_mode=True,
+                            model=self._llm.model,
+                        ),
+                        timeout=_LLM_SUMMARIZE_TIMEOUT,
                     )
+                elapsed = asyncio.get_event_loop().time() - t0
+                print(f"[Summary Timing] {role} completed in {elapsed:.2f}s")
                 clean_raw = raw.strip()
                 if clean_raw.startswith("```"):
                     clean_raw = clean_raw.split("\n", 1)[-1]
@@ -729,6 +742,13 @@ class ControllerAgent:
                 summary = result.get("summary", "IGNORE")
                 proposal = result.get("proposal")
                 return role, {"text": summary, "proposal": proposal}
+            except asyncio.TimeoutError:
+                elapsed = asyncio.get_event_loop().time() - t0
+                print(
+                    f"[Summary Timing] {role} TIMED OUT after {elapsed:.2f}s "
+                    f"(limit={_LLM_SUMMARIZE_TIMEOUT}s) — skipping analysis"
+                )
+                return role, {"text": "IGNORE", "proposal": None}
             except Exception as exc:
                 print(f"[ControllerAgent] Persona {role} failed: {exc}")
                 return role, {"text": "IGNORE", "proposal": None}

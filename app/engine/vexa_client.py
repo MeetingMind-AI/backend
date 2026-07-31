@@ -248,8 +248,8 @@ async def _generate_and_log_final_report(
             )
 
 
-def _is_local_meeting_terminal(meeting_id: int) -> bool:
-    """Check if local meeting status is in terminal state ('completed' or 'failed').
+def _is_local_meeting_terminal_sync(meeting_id: int) -> bool:
+    """Synchronous check if local meeting status is in terminal state.
 
     Args:
         meeting_id (int): Target meeting primary key ID.
@@ -263,6 +263,22 @@ def _is_local_meeting_terminal(meeting_id: int) -> bool:
             return True
         status_value = str(meeting.status or "").strip().lower()
         return status_value in TERMINAL_MEETING_STATUSES
+
+
+async def _is_local_meeting_terminal(meeting_id: int) -> bool:
+    """Async check if local meeting status is in terminal state.
+
+    Wraps the synchronous DB call in asyncio.to_thread() to avoid blocking
+    the event loop — critical during real-time transcript polling where any
+    event-loop stall delays audio → transcript delivery.
+
+    Args:
+        meeting_id (int): Target meeting primary key ID.
+
+    Returns:
+        bool: True if terminal or meeting record does not exist, False otherwise.
+    """
+    return await asyncio.to_thread(_is_local_meeting_terminal_sync, meeting_id)
 
 
 def _extract_latest_remote_meeting(
@@ -734,7 +750,15 @@ async def poll_transcripts_from_vexa(
                 for _ in chunk_texts:
                     summary_queue.task_done()
                 continue
-                
+
+            queue_depth = summary_queue.qsize()
+            if queue_depth > 0:
+                logger.info(
+                    f"[Summary Worker] Processing batch of {len(chunk_texts)} chunks, "
+                    f"{queue_depth} more queued"
+                )
+
+            t0 = asyncio.get_event_loop().time()
             try:
                 with SessionLocal() as db_session:
                     pending_rows = (
@@ -802,13 +826,18 @@ async def poll_transcripts_from_vexa(
                 logger.info(
                     f"[Vexa] Ollama analysis failed for batched chunks: {exc}"
                 )
+            finally:
+                elapsed = asyncio.get_event_loop().time() - t0
+                logger.info(
+                    f"[Summary Worker] Batch of {len(chunk_texts)} chunks processed in {elapsed:.2f}s"
+                )
                 
             for _ in chunk_texts:
                 summary_queue.task_done()
 
     worker_task = asyncio.create_task(_summary_worker())
 
-    while not _is_local_meeting_terminal(meeting_id):
+    while not await _is_local_meeting_terminal(meeting_id):
         try:
             old_sigs = _seen_chunk_sigs.get(meeting_id, set())
             upserted = await sync_final_transcript_from_vexa(
