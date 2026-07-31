@@ -1022,6 +1022,7 @@ class ActionCreateRequest(BaseModel):
     action_type: str = Field(pattern="^(parking_lot|to_do|to_schedule)$")
     content: str
     assignee_id: int | None = None
+    status: str = Field(default="accepted", pattern="^(accepted|pending|rejected)$")
     tags: list[str] | None = None
 
 
@@ -1054,7 +1055,7 @@ def create_action(
             action_type=request.action_type,
             content=request.content,
             assignee_id=request.assignee_id,
-            status="pending",
+            status=request.status,
             tags=request.tags or [],
         )
         db.add(action)
