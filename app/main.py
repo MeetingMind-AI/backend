@@ -249,7 +249,7 @@ async def start_meeting(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            vexa_api_url = os.getenv("VEXA_API_URL", "http://host.docker.internal:18056/bots")
+            vexa_api_url = os.getenv("VEXA_API_URL", "http://gateway:8000/bots")
             bot_response = await client.post(
                 vexa_api_url,
                 json=bot_payload,
@@ -264,6 +264,8 @@ async def start_meeting(
             detail=exc.response.text or "Failed to deploy Vexa bot",
         ) from exc
     except httpx.HTTPError as exc:
+        import logging
+        logging.error(f"HTTPError in start_meeting! URL: {vexa_api_url}, Exc: {type(exc)} {exc}")
         raise HTTPException(
             status_code=502, detail=f"Failed to contact Vexa bot service: {exc}"
         ) from exc
@@ -370,7 +372,7 @@ async def leave_meeting(
     if platform and native_id and vexa_api_key:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                vexa_api_url = os.getenv("VEXA_API_URL", "http://host.docker.internal:18056/bots")
+                vexa_api_url = os.getenv("VEXA_API_URL", "http://gateway:8000/bots")
                 # Ensure the url ends with bots before appending platform/native_id
                 base_bots_url = vexa_api_url if vexa_api_url.endswith("/bots") else f"{vexa_api_url}/bots"
                 bot_response = await client.delete(
@@ -451,8 +453,9 @@ async def redispatch_meeting(
     headers = {"X-API-Key": vexa_api_key, "Content-Type": "application/json"}
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
+            vexa_api_url = os.getenv("VEXA_API_URL", "http://gateway:8000/bots")
             bot_response = await client.post(
-                "http://host.docker.internal:8056/bots",
+                vexa_api_url,
                 json={"platform": platform, "native_meeting_id": native_id, "transcribe_enabled": True},
                 headers=headers,
             )
