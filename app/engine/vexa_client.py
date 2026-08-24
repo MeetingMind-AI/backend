@@ -285,6 +285,7 @@ def _extract_latest_remote_meeting(
     meetings_payload: Any,
     platform: str,
     native_id: str,
+    vexa_remote_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Filter Vexa meetings API JSON response to find latest matching remote meeting.
 
@@ -292,6 +293,7 @@ def _extract_latest_remote_meeting(
         meetings_payload (Any): JSON response from Vexa /meetings endpoint.
         platform (str): Meeting platform name.
         native_id (str): Native platform meeting ID.
+        vexa_remote_id (str | None): Optional Vexa numeric ID string.
 
     Returns:
         dict[str, Any] | None: Matching meeting dictionary or None.
@@ -302,6 +304,15 @@ def _extract_latest_remote_meeting(
     meetings = meetings_payload.get("meetings")
     if not isinstance(meetings, list):
         return None
+
+    if vexa_remote_id:
+        try:
+            target_id = int(vexa_remote_id)
+            for item in meetings:
+                if isinstance(item, dict) and item.get("id") == target_id:
+                    return item
+        except (ValueError, TypeError):
+            pass
 
     matched: list[dict[str, Any]] = []
     for item in meetings:
@@ -568,6 +579,7 @@ async def monitor_meeting_until_terminal(
     native_id: str,
     api_key: str | None = None,
     timeout_seconds: int = 7200,
+    vexa_remote_id: str | None = None,
 ) -> None:
     """Asynchronous polling loop that monitors Vexa meeting lifecycle state until terminal state is reached.
 
@@ -577,6 +589,7 @@ async def monitor_meeting_until_terminal(
         native_id (str): Native meeting identifier.
         api_key (str | None): Vexa API key string.
         timeout_seconds (int): Maximum polling duration in seconds (default 7200s).
+        vexa_remote_id (str | None): Optional Vexa numeric ID string.
     """
     vexa_api_key = (api_key or os.getenv("VEXA_API_KEY", "")).strip()
     if not vexa_api_key:
@@ -585,7 +598,6 @@ async def monitor_meeting_until_terminal(
 
     base_url = _vexa_api_base_url()
     meetings_url = f"{base_url}/meetings"
-    bot_url = f"{base_url}/bots/{platform}/{native_id}"
     poll_interval = int(os.getenv("VEXA_MEETING_POLL_INTERVAL_SECONDS", "5"))
     if poll_interval < 3:
         poll_interval = 3
@@ -595,41 +607,17 @@ async def monitor_meeting_until_terminal(
     seen_in_vexa = False
     consecutive_not_found = 0
     while time.monotonic() < deadline:
-        if _is_local_meeting_terminal(meeting_id):
+        if await _is_local_meeting_terminal(meeting_id):
             return
 
         headers = {"X-API-Key": vexa_api_key}
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                meetings_result, bot_result = await asyncio.gather(
-                    client.get(meetings_url, headers=headers),
-                    client.get(bot_url, headers=headers),
-                    return_exceptions=True,
-                )
+                meetings_result = await client.get(meetings_url, headers=headers)
         except Exception as exc:
             logger.info(f"[Vexa] Poll gather failed for meeting {meeting_id}: {exc}")
             await asyncio.sleep(poll_interval)
             continue
-
-        # Fast path: if the bot endpoint returns 404 the bot was removed
-        if (
-            isinstance(bot_result, httpx.Response)
-            and bot_result.status_code == 404
-            and seen_in_vexa
-        ):
-            logger.info(
-                f"[Vexa] Bot 404 for meeting {meeting_id} after being seen; treating as completed"
-            )
-            update_meeting_status(meeting_id, "completed")
-            await _finalize_completed_meeting(
-                controller=controller,
-                meeting_id=meeting_id,
-                platform=platform,
-                native_id=native_id,
-                api_key=vexa_api_key,
-                source="poller-bot-404",
-            )
-            return
 
         # Meetings endpoint check
         if not isinstance(meetings_result, httpx.Response):
@@ -645,7 +633,9 @@ async def monitor_meeting_until_terminal(
             await asyncio.sleep(poll_interval)
             continue
 
-        remote_meeting = _extract_latest_remote_meeting(payload, platform, native_id)
+        remote_meeting = _extract_latest_remote_meeting(
+            payload, platform, native_id, vexa_remote_id=vexa_remote_id
+        )
         if not remote_meeting:
             if seen_in_vexa:
                 consecutive_not_found += 1

@@ -335,7 +335,11 @@ async def start_meeting(
                 ws_manager=manager,
             ),
             monitor_meeting_until_terminal(
-                meeting.id, request.platform, request.native_id, vexa_api_key
+                meeting.id,
+                request.platform,
+                request.native_id,
+                vexa_api_key,
+                vexa_remote_id=vexa_meeting_id,
             ),
         )
 
