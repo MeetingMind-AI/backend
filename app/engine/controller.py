@@ -650,7 +650,7 @@ class ControllerAgent:
                         f"- {text}" for text in memory_texts if text
                     )
                     self._pre_meeting_context = (
-                        "--- PRE-MEETING CONTEXT (Past Knowledge) ---\n"
+                        "--- PRE-MEETING CONTEXT (Past Knowledge - Reference Only) ---\n"
                         f"{formatted_memories}"
                     )
                     print(
@@ -863,6 +863,36 @@ class ControllerAgent:
             TranscriptLoader.load, meeting_id, db_session
         )
 
+        # Check transcript threshold to prevent hallucinations on trivial / empty meetings
+        MIN_REPORT_WORD_COUNT = 25
+        word_count = len(transcript.split()) if transcript else 0
+
+        if not transcript or word_count < MIN_REPORT_WORD_COUNT:
+            summary_msg = (
+                "No transcript content available."
+                if not transcript
+                else f"Meeting was too brief ({word_count} words) to generate an in-depth synthesis: \"{transcript}\""
+            )
+            print(
+                f"[Final Report] meeting={meeting_id} (word_count={word_count}) - insufficient content for multi-agent synthesis. Using fallback report."
+            )
+            fallback_report = {
+                "tech_lead": json.dumps({"technical_decisions": [], "architecture": [], "engineering_blockers": []}),
+                "product_manager": json.dumps({"feature_requests": [], "ux_topics": [], "roadmap_alignment": []}),
+                "scrum_master": json.dumps({
+                    "title": "Brief Check-in" if transcript else "Empty Meeting",
+                    "summary": summary_msg,
+                    "pending_to_schedule": [],
+                    "parking_lot": [],
+                    "to_do": [],
+                }),
+            }
+            try:
+                self._persist(db_session, meeting_id, fallback_report, [])
+            except Exception as exc:
+                print(f"[Final Report] Failed to persist fallback report: {exc}")
+            return json.dumps(fallback_report)
+
         # Determine the Mem0 partition string
         mem0_user = f"team_{team_id}" if team_id else "global_team"
 
@@ -878,21 +908,11 @@ class ControllerAgent:
             except Exception as exc:
                 print(f"[Memory Error] Failed to search memories: {exc}")
 
-        if not transcript:
-            msg = "## Summary\nNo transcript content available."
-            print(f"[Final Report] meeting={meeting_id}\n{msg}\n")
-            fallback_report = {"scrum_master": {"summary": "No transcript content available."}}
-            try:
-                self._persist(db_session, meeting_id, fallback_report, [])
-            except Exception as exc:
-                print(f"[Final Report] Failed to persist empty report: {exc}")
-            return json.dumps(fallback_report)
-
         # 2. Initial analysis: Tech Lead + Product Manager (parallel)
         base_prompt = (
             f"Meeting ID: {meeting_id}\n\n"
-            f"--- RELEVANT PAST MEMORIES & CONTEXT ---\n{past_memories}\n\n"
-            f"--- CURRENT TRANSCRIPT ---\n{transcript}"
+            f"--- RELEVANT PAST MEMORIES & BACKGROUND (Reference Only) ---\n{past_memories}\n\n"
+            f"--- CURRENT TRANSCRIPT (Primary Source) ---\n{transcript}"
         )
         initial_reports = await self._run_initial_analyses(base_prompt, prompts)
 

@@ -46,8 +46,9 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     "}\n"
     "</json_schema_enforcement>\n\n"
     "Interpretation guidance: summary is one sentence describing the utterance's key task, blocker, ticket, or deadline. "
-    "If the utterance is greeting/filler/chit-chat, set summary to 'IGNORE' and set proposal to null. "
-    "If actionable, set proposal.type to parking_lot, to_do, to_schedule, or blocker with a short paraphrased content string grounded only in the utterance. "
+    "If the utterance is greeting/filler/chit-chat/agreement (e.g., 'that is what we need', 'that is my piece', 'sounds good', 'okay'), set summary to 'IGNORE' and set proposal to null. "
+    "Do NOT use past context to invent or attribute proposals to generic agreements or filler utterances. "
+    "If actionable, set proposal.type to parking_lot, to_do, to_schedule, or blocker with a short paraphrased content string grounded strictly and only in the explicit content of the current utterance. "
     "Use 'blocker' when you detect that the conversation is not moving, the team is talking in circles, or a clear blocker is stated."
 )
 
@@ -79,11 +80,12 @@ FINAL_REPORT_TECH_LEAD_PROMPT = (
     "1. Base your response strictly on the provided transcript. Do not invent details.\n"
     "2. If there are no items for a specific category, use an empty array [].\n"
     "3. Do not add any keys beyond the ones specified above.\n\n"
-    "STRICT GROUNDING RULES: You must rely EXCLUSIVELY on the provided transcript and "
-    "memory context. Do NOT invent, assume, or infer any details, names, dates, tools, "
-    "or decisions that are not explicitly stated. If information is missing, state "
-    "'Not discussed' or 'No information provided'. Fabricating information is strictly "
-    "prohibited."
+    "STRICT GROUNDING RULES:\n"
+    "1. Past memories and context are provided strictly for background reference (e.g. recognizing project names, technologies, or architectures).\n"
+    "2. Extract technical decisions, architecture topics, and engineering blockers ONLY if they were explicitly and actively discussed in the CURRENT TRANSCRIPT.\n"
+    "3. Do NOT carry over past memories into new decisions, architecture items, or blockers unless the current transcript explicitly discusses them.\n"
+    "4. If the transcript is very short, vague, or does not contain meaningful technical discussions, return empty arrays: {\"technical_decisions\": [], \"architecture\": [], \"engineering_blockers\": []}.\n"
+    "5. Fabricating information or assuming topics based solely on past memories without explicit discussion in the transcript is strictly prohibited."
 )
 
 FINAL_REPORT_PRODUCT_MANAGER_PROMPT = (
@@ -106,11 +108,12 @@ FINAL_REPORT_PRODUCT_MANAGER_PROMPT = (
     "1. Base your response strictly on the provided transcript. Do not invent details.\n"
     "2. If there are no items for a specific category, use an empty array [].\n"
     "3. Do not add any keys beyond the ones specified above.\n\n"
-    "STRICT GROUNDING RULES: You must rely EXCLUSIVELY on the provided transcript and "
-    "memory context. Do NOT invent, assume, or infer any details, names, dates, tools, "
-    "or decisions that are not explicitly stated. If information is missing, state "
-    "'Not discussed' or 'No information provided'. Fabricating information is strictly "
-    "prohibited."
+    "STRICT GROUNDING RULES:\n"
+    "1. Past memories and context are provided strictly for background reference (e.g. recognizing product names or roadmap items).\n"
+    "2. Extract feature requests, UX topics, and roadmap alignment ONLY if they were explicitly and actively discussed in the CURRENT TRANSCRIPT.\n"
+    "3. Do NOT carry over past memories into feature requests or tasks unless the current transcript explicitly discusses them.\n"
+    "4. If the transcript is very short, vague, or does not contain meaningful product discussions, return empty arrays: {\"feature_requests\": [], \"ux_topics\": [], \"roadmap_alignment\": []}.\n"
+    "5. Fabricating information or assuming topics based solely on past memories without explicit discussion in the transcript is strictly prohibited."
 )
 
 FINAL_REPORT_SCRUM_MASTER_PROMPT = (
@@ -134,15 +137,15 @@ FINAL_REPORT_SCRUM_MASTER_PROMPT = (
     "  ]\n"
     "}\n\n"
     "Rules:\n"
-    "1. Base your response strictly on the provided transcript. Do not invent details.\n"
+    "1. Base your response strictly on the provided transcript and the findings grounded in it. Do not invent details.\n"
     "2. Do not mention missing transcript text, model limitations, or speculative issues.\n"
-    "3. Ensure the summary flows naturally and covers all major talking points.\n"
+    "3. Ensure the summary flows naturally and covers all major talking points actually discussed.\n"
     "4. If there are no items for a specific category, use an empty array [].\n\n"
-    "STRICT GROUNDING RULES: You must rely EXCLUSIVELY on the provided transcript and "
-    "memory context. Do NOT invent, assume, or infer any details, names, dates, tools, "
-    "or decisions that are not explicitly stated. If information is missing, state "
-    "'Not discussed' or 'No information provided'. Fabricating information is strictly "
-    "prohibited."
+    "STRICT GROUNDING RULES:\n"
+    "1. Base the title, summary, and action items (to_do, parking_lot, pending_to_schedule) strictly on topics explicitly discussed in the transcript.\n"
+    "2. If the transcript contains very little or trivial discussion, provide an accurate, brief summary of what was said and return empty arrays for to_do, parking_lot, and pending_to_schedule.\n"
+    "3. Do NOT invent action items or decisions from background memory if they were not explicitly agreed upon or discussed in the transcript.\n"
+    "4. Fabricating information is strictly prohibited."
 )
 
 # Personas that produce initial independent analyses (Tech Lead + PM).
@@ -209,10 +212,10 @@ DISCUSSION_PERSONA_PROMPTS = {
 REALTIME_USER_PROMPT = (
     "Transcript:\n{transcript}\n\n"
     "{pre_meeting_context}\n\n"
-    "Analyze the utterance above using the provided context (if any), "
-    "and respond with the JSON format specified in your instructions. "
-    "If the transcript contains only filler words, agreements (e.g., 'yes', 'okay'), "
-    "or lacks actionable technical/product substance, you MUST set all fields to null."
+    "Analyze the utterance above. The pre-meeting context is provided for background reference ONLY (e.g. recognizing project names). "
+    "You MUST NOT extract proposals or summaries from the pre-meeting context unless the current transcript explicitly discusses them. "
+    "If the transcript contains only filler words, agreements (e.g., 'yes', 'okay', 'that is what we need', 'that is my piece'), "
+    "or lacks actionable technical/product substance, you MUST set summary to 'IGNORE' and proposal to null."
 )
 
 INSTANT_CLARITY_USER_PROMPT = (
@@ -223,9 +226,9 @@ INSTANT_CLARITY_USER_PROMPT = (
 
 INITIAL_ANALYSIS_USER_PROMPT = (
     "Meeting ID: {meeting_id}\n\n"
-    "--- RELEVANT PAST MEMORIES & CONTEXT ---\n"
+    "--- RELEVANT PAST MEMORIES & BACKGROUND (Reference Only) ---\n"
     "{past_memories}\n\n"
-    "--- CURRENT TRANSCRIPT ---\n"
+    "--- CURRENT TRANSCRIPT (Primary Source) ---\n"
     "{transcript}"
 )
 
