@@ -480,9 +480,28 @@ def update_member(
         if req.role is not None and team.owner_id != user_id:
             raise HTTPException(status_code=403, detail="Only team owners can change roles")
             
-        # Only the user or owner can change notification preferences
-        if req.notification_preferences is not None and target_user_id != user_id and team.owner_id != user_id:
-            raise HTTPException(status_code=403, detail="Only the user or team owner can change notification preferences")
+        # Only the user or owner can change notification preferences.
+        # However, notification *type* preferences (keys containing "type:") are
+        # exclusively controlled by the team owner — members cannot set them for
+        # themselves or others.
+        if req.notification_preferences is not None:
+            is_owner = team.owner_id == user_id
+            if not is_owner and target_user_id != user_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the team owner can change notification preferences for other members",
+                )
+            if not is_owner:
+                # Non-owner can only change topic preferences, not type-gated prefs
+                type_prefs_requested = [
+                    p for p in req.notification_preferences
+                    if "type:" in p
+                ]
+                if type_prefs_requested:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Only the team owner can manage notification type permissions",
+                    )
 
         membership = db.execute(
             select(TeamMembership).where(
