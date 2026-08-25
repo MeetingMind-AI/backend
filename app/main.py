@@ -328,6 +328,7 @@ async def start_meeting(
     bot_payload = {
         "platform": request.platform,
         "native_meeting_id": request.native_id,
+        "bot_name": "Meeting Mind",
         "transcribe_enabled": True,
     }
     if request.passcode:
@@ -575,7 +576,7 @@ async def redispatch_meeting(
             vexa_api_url = os.getenv("VEXA_API_URL", "http://gateway:8000/bots")
             bot_response = await client.post(
                 vexa_api_url,
-                json={"platform": platform, "native_meeting_id": native_id, "transcribe_enabled": True},
+                json={"platform": platform, "native_meeting_id": native_id, "bot_name": "Meeting Mind", "transcribe_enabled": True},
                 headers=headers,
             )
         bot_response.raise_for_status()
