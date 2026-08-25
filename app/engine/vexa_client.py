@@ -28,13 +28,19 @@ from app.db.models import AgentAction, Meeting, TranscriptChunk
 from app.db.session import SessionLocal
 from app.engine.controller import ControllerAgent
 from app.engine.prompts import get_team_prompts
+from app.engine.summary_tasks import (
+    active_summary_thoughts,
+    finalizing_meetings,
+    summary_starts,
+    summary_tasks,
+)
 
 TERMINAL_MEETING_STATUSES = {"completed", "failed"}
 FINALIZATION_PROGRESS_INTERVAL_SECONDS = 5
 SYSTEM_PARTICIPANT_NAMES = {"meeting audio"}
 
 _seen_chunk_sigs: dict[int, set[str]] = {}
-_finalizing: set[int] = set()
+_finalizing = finalizing_meetings
 
 
 def _get_chunk_sigs(meeting_id: int) -> set[str]:
@@ -198,7 +204,8 @@ async def _finalize_completed_meeting(
         logger.info(f"[Vexa] Finalization already in progress for meeting {meeting_id}; skipping ({source})")
         return
     _finalizing.add(meeting_id)
-
+    summary_starts.setdefault(meeting_id, time.time())
+    active_summary_thoughts[meeting_id] = []
 
     logger.info(f"[Vexa] Starting finalization for meeting {meeting_id} (source={source})")
     progress_done = asyncio.Event()
@@ -206,6 +213,17 @@ async def _finalize_completed_meeting(
         _emit_finalization_progress(meeting_id, progress_done, source)
     )
     started = time.monotonic()
+
+    async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
+        active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
+        try:
+            from app.api.ws_manager import manager
+            await manager.broadcast(meeting_id, {
+                "type": "summary_thought",
+                "thought": thought_dict,
+            })
+        except Exception as ws_err:
+            logger.debug("Failed to broadcast thought via ws: %s", ws_err)
 
     try:
         upserted = await sync_final_transcript_from_vexa(
@@ -218,10 +236,17 @@ async def _finalize_completed_meeting(
             f"[Vexa] Final transcript sync for meeting {meeting_id} upserted {upserted} chunks"
         )
         await sync_speakers_from_vexa(meeting_id, platform, native_id, api_key)
-        await _generate_and_log_final_report(controller, meeting_id)
+        await _generate_and_log_final_report(
+            controller, meeting_id, on_thought=on_summary_thought
+        )
+    except asyncio.CancelledError:
+        logger.info(f"[Vexa] Finalization for meeting {meeting_id} cancelled by user")
+        raise
     finally:
         progress_done.set()
         await progress_task
+        summary_tasks.pop(meeting_id, None)
+        summary_starts.pop(meeting_id, None)
         _finalizing.discard(meeting_id)
 
     duration = round(time.monotonic() - started, 2)
@@ -229,19 +254,27 @@ async def _finalize_completed_meeting(
 
 
 async def _generate_and_log_final_report(
-    controller: ControllerAgent, meeting_id: int
+    controller: ControllerAgent,
+    meeting_id: int,
+    on_thought: Any | None = None,
 ) -> None:
     """Trigger ControllerAgent to generate and persist final meeting summary report.
 
     Args:
         controller (ControllerAgent): ControllerAgent orchestrator instance.
         meeting_id (int): Target meeting primary key ID.
+        on_thought (Any | None): Optional live thought streaming callback.
     """
     with SessionLocal() as db:
         try:
             meeting = db.get(Meeting, meeting_id)
             team_id = meeting.team_id if meeting else None
-            await controller.generate_final_report(meeting_id, db, team_id=team_id)
+            await controller.generate_final_report(
+                meeting_id, db, team_id=team_id, on_thought=on_thought
+            )
+        except asyncio.CancelledError:
+            logger.info(f"[Vexa] Final report generation for meeting {meeting_id} was cancelled")
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.info(
                 f"[Vexa] Failed to generate final report for meeting {meeting_id}: {type(exc).__name__}: {str(exc)}"

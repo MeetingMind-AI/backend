@@ -38,6 +38,14 @@ from app.db.models import AgentAction, Meeting, Session, TeamMembership, Topic, 
 from app.db.session import SessionLocal, engine
 from app.engine.controller import ControllerAgent
 from app.engine.email_service import build_email_html, send_meeting_email
+from app.engine.summary_tasks import (
+    active_summary_thoughts,
+    cancel_summary_task,
+    finalizing_meetings,
+    is_meeting_summarizing,
+    summary_starts,
+    summary_tasks,
+)
 from app.engine.vexa_client import (
     TERMINAL_MEETING_STATUSES,
     _finalizing,
@@ -47,6 +55,10 @@ from app.engine.vexa_client import (
     sync_speakers_from_vexa,
     update_meeting_status,
 )
+
+_resummarizing_tasks = summary_tasks
+_resummarizing_start = summary_starts
+_active_summary_thoughts = active_summary_thoughts
 
 
 @asynccontextmanager
@@ -466,9 +478,11 @@ async def leave_meeting(
         except httpx.HTTPError as exc:
             logger.info(f"[Leave] Failed to remove bot: {exc}")
 
-    background_tasks.add_task(
-        _finalize_meeting, meeting_id, platform or "", native_id or "", vexa_api_key
+    task = asyncio.create_task(
+        _finalize_meeting(meeting_id, platform or "", native_id or "", vexa_api_key)
     )
+    summary_tasks[meeting_id] = task
+    summary_starts[meeting_id] = time.time()
     return JSONResponse(
         status_code=202,
         content={
@@ -481,10 +495,24 @@ async def leave_meeting(
 async def _finalize_meeting(
     meeting_id: int, platform: str, native_id: str, api_key: str
 ) -> None:
-    if meeting_id in _finalizing:
+    if meeting_id in finalizing_meetings:
         logger.info(f"[Leave] Finalization already running for meeting {meeting_id}; skipping")
         return
-    _finalizing.add(meeting_id)
+    finalizing_meetings.add(meeting_id)
+    summary_starts.setdefault(meeting_id, time.time())
+    active_summary_thoughts[meeting_id] = []
+
+    async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
+        active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
+        try:
+            from app.api.ws_manager import manager
+            await manager.broadcast(meeting_id, {
+                "type": "summary_thought",
+                "thought": thought_dict,
+            })
+        except Exception as ws_err:
+            logger.debug("Failed to broadcast thought via ws: %s", ws_err)
+
     try:
         update_meeting_status(meeting_id, "completed")
 
@@ -505,11 +533,18 @@ async def _finalize_meeting(
             team_id = meeting.team_id if meeting else None
             controller = ControllerAgent()
             try:
-                await controller.generate_final_report(meeting_id, db, team_id=team_id)
+                await controller.generate_final_report(
+                    meeting_id, db, team_id=team_id, on_thought=on_summary_thought
+                )
+            except asyncio.CancelledError:
+                logger.info(f"[Leave] Final report generation for meeting {meeting_id} was cancelled by user")
+                raise
             except Exception as exc:
                 logger.info(f"[Leave] Failed to generate final report: {exc}")
     finally:
-        _finalizing.discard(meeting_id)
+        summary_tasks.pop(meeting_id, None)
+        summary_starts.pop(meeting_id, None)
+        finalizing_meetings.discard(meeting_id)
 
 
 @app.post("/api/meetings/{meeting_id}/redispatch")
@@ -727,18 +762,14 @@ def list_meetings(
                 if t:
                     topics.append({"id": t.id, "name": t.name, "color": t.color})
 
-            is_summarizing = (
-                (m.id in _resummarizing_tasks and not _resummarizing_tasks[m.id].done())
-                or m.status == "processing"
-                or (m.status == "completed" and not m.summary)
-            )
+            is_summarizing = is_meeting_summarizing(m.id, m.status)
             result.append({
                 "id": m.id,
                 "title": m.title,
                 "status": m.status,
                 "summary": m.summary,
                 "is_summarizing": is_summarizing,
-                "summarizing_started_at": _resummarizing_start.get(m.id),
+                "summarizing_started_at": summary_starts.get(m.id),
                 "discussion_log": m.discussion_log or [],
                 "team_id": m.team_id,
                 "created_at": m.created_at.isoformat() if m.created_at else None,
@@ -778,19 +809,15 @@ def get_meeting(
             t = db.get(Topic, row.topic_id)
             if t:
                 topics.append({"id": t.id, "name": t.name, "color": t.color})
-        is_summarizing = (
-            (meeting.id in _resummarizing_tasks and not _resummarizing_tasks[meeting.id].done())
-            or meeting.status == "processing"
-            or (meeting.status == "completed" and not meeting.summary)
-        )
+        is_summarizing = is_meeting_summarizing(meeting.id, meeting.status)
         return {
             "id": meeting.id,
             "title": meeting.title,
             "status": meeting.status,
             "summary": meeting.summary,
             "is_summarizing": is_summarizing,
-            "summarizing_started_at": _resummarizing_start.get(meeting.id),
-            "live_summary_thoughts": _active_summary_thoughts.get(meeting.id, []),
+            "summarizing_started_at": summary_starts.get(meeting.id),
+            "live_summary_thoughts": active_summary_thoughts.get(meeting.id, []),
             "discussion_log": meeting.discussion_log or [],
             "team_id": meeting.team_id,
             "can_edit": can_edit,
@@ -866,21 +893,13 @@ def delete_meeting(
     return {"ok": True}
 
 
-import time
-import asyncio
-
-_resummarizing_tasks: dict[int, asyncio.Task] = {}
-_resummarizing_start: dict[int, float] = {}
-_active_summary_thoughts: dict[int, list[dict[str, Any]]] = {}
-
-
 async def _resummarize_meeting_task(meeting_id: int, team_id: int | None) -> None:
     """Background task to regenerate meeting summary without blocking HTTP gateway."""
-    _resummarizing_start[meeting_id] = time.time()
-    _active_summary_thoughts[meeting_id] = []
+    summary_starts[meeting_id] = time.time()
+    active_summary_thoughts[meeting_id] = []
 
     async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
-        _active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
+        active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
         try:
             from app.api.ws_manager import manager
             await manager.broadcast(meeting_id, {
@@ -903,8 +922,8 @@ async def _resummarize_meeting_task(meeting_id: int, team_id: int | None) -> Non
             except Exception as exc:
                 logger.exception("Failed to resummarize meeting %s in background: %s", meeting_id, exc)
     finally:
-        _resummarizing_tasks.pop(meeting_id, None)
-        _resummarizing_start.pop(meeting_id, None)
+        summary_tasks.pop(meeting_id, None)
+        summary_starts.pop(meeting_id, None)
 
 
 @app.post("/api/meetings/{meeting_id}/resummarize")
@@ -931,7 +950,7 @@ async def resummarize_meeting(
         team_id = meeting.team_id
 
         # Cancel any already-running task for this meeting
-        old_task = _resummarizing_tasks.get(meeting_id)
+        old_task = summary_tasks.get(meeting_id)
         if old_task and not old_task.done():
             old_task.cancel()
 
@@ -939,10 +958,10 @@ async def resummarize_meeting(
         meeting.summary = None
         db.commit()
 
-        _active_summary_thoughts[meeting_id] = []
+        active_summary_thoughts[meeting_id] = []
         task = asyncio.create_task(_resummarize_meeting_task(meeting_id, team_id))
-        _resummarizing_tasks[meeting_id] = task
-        _resummarizing_start[meeting_id] = time.time()
+        summary_tasks[meeting_id] = task
+        summary_starts[meeting_id] = time.time()
 
         from app.db.models import Topic
         topic_rows = db.execute(
@@ -964,7 +983,7 @@ async def resummarize_meeting(
                 "status": meeting.status,
                 "summary": None,
                 "is_summarizing": True,
-                "summarizing_started_at": _resummarizing_start.get(meeting_id),
+                "summarizing_started_at": summary_starts.get(meeting_id),
                 "live_summary_thoughts": [],
                 "team_id": meeting.team_id,
                 "can_edit": True,
@@ -976,7 +995,7 @@ async def resummarize_meeting(
 
 
 @app.post("/api/meetings/{meeting_id}/stop-summary")
-def stop_summary_generation(
+async def stop_summary_generation(
     meeting_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
@@ -995,14 +1014,21 @@ def stop_summary_generation(
             raise HTTPException(status_code=404, detail="Meeting not found")
         _assert_can_edit_meeting(db, user_id, meeting)
 
-    task = _resummarizing_tasks.get(meeting_id)
-    if task and not task.done():
-        task.cancel()
-        _resummarizing_tasks.pop(meeting_id, None)
-        _resummarizing_start.pop(meeting_id, None)
-        _active_summary_thoughts.pop(meeting_id, None)
-        return {"ok": True, "message": "Summary generation stopped successfully."}
-    return {"ok": True, "message": "No active summary generation to stop."}
+    stopped = cancel_summary_task(meeting_id)
+
+    try:
+        from app.api.ws_manager import manager
+        await manager.broadcast(meeting_id, {
+            "type": "summary_stopped",
+            "meeting_id": meeting_id,
+        })
+    except Exception as ws_err:
+        logger.debug("Failed to broadcast stop summary event: %s", ws_err)
+
+    return {
+        "ok": True,
+        "message": "Summary generation stopped successfully." if stopped else "No active summary generation to stop."
+    }
 
 
 @app.get("/api/meetings/{meeting_id}/summary-thoughts")
