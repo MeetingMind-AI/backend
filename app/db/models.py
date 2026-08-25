@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -21,7 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
-    text,
+    text as sa_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -159,7 +160,7 @@ class TeamMembership(Base):
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default=text("'member'"))
+    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default=sa_text("'member'"))
     notification_preferences: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="memberships")
@@ -182,7 +183,7 @@ class Meeting(Base):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(
-        String(64), nullable=False, server_default=text("'pending'")
+        String(64), nullable=False, server_default=sa_text("'pending'")
     )
     summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     discussion_log: Mapped[list | None] = mapped_column(JSONB, nullable=True)
@@ -219,7 +220,8 @@ class TranscriptChunk(Base):
     """Transcript Chunk ORM Model.
 
     Stores individual speaker audio/text utterances captured during a meeting,
-    with exact UTC timestamps and speaker identity.
+    with exact UTC timestamps and speaker identity. Also tracks edit history
+    and original utterance text for reversion.
     """
 
     __tablename__ = "transcript_chunks"
@@ -233,6 +235,17 @@ class TranscriptChunk(Base):
     speaker: Mapped[str] = mapped_column(String(120), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_edited: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa_text("false"), default=False
+    )
+    original_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    original_speaker: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    edited_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
     meeting: Mapped[Meeting] = relationship(back_populates="transcript_chunks")
 
@@ -262,7 +275,7 @@ class AgentAction(Base):
     action_type: Mapped[str] = mapped_column(String(120), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'pending'")
+        String(20), nullable=False, server_default=sa_text("'pending'")
     )
     tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
@@ -285,7 +298,7 @@ class Topic(Base):
     )
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     color: Mapped[str] = mapped_column(
-        String(7), nullable=False, server_default=text("'#4f8ef7'")
+        String(7), nullable=False, server_default=sa_text("'#4f8ef7'")
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

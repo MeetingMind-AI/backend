@@ -15,6 +15,7 @@ action item management, and service health checks.
 
 
 import asyncio
+from datetime import datetime
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -33,7 +34,7 @@ from app.api.teams import router as teams_router
 from app.api.websockets import router as websocket_router
 from app.api.ws_manager import manager
 from app.db.base import Base
-from app.db.models import AgentAction, Meeting, Session, TeamMembership, TranscriptChunk, meeting_topics, User
+from app.db.models import AgentAction, Meeting, Session, TeamMembership, Topic, TranscriptChunk, meeting_topics, User
 from app.db.session import SessionLocal, engine
 from app.engine.controller import ControllerAgent
 from app.engine.email_service import build_email_html, send_meeting_email
@@ -63,6 +64,11 @@ async def lifespan(app: FastAPI):
         conn.execute(text("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speakers JSONB"))
         conn.execute(text("ALTER TABLE agent_actions ADD COLUMN IF NOT EXISTS assignee_id INTEGER"))
         conn.execute(text("ALTER TABLE agent_actions ADD COLUMN IF NOT EXISTS tags JSONB"))
+        conn.execute(text("ALTER TABLE transcript_chunks ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE"))
+        conn.execute(text("ALTER TABLE transcript_chunks ADD COLUMN IF NOT EXISTS original_text TEXT"))
+        conn.execute(text("ALTER TABLE transcript_chunks ADD COLUMN IF NOT EXISTS original_speaker VARCHAR(120)"))
+        conn.execute(text("ALTER TABLE transcript_chunks ADD COLUMN IF NOT EXISTS edited_at TIMESTAMP WITH TIME ZONE"))
+        conn.execute(text("ALTER TABLE transcript_chunks ADD COLUMN IF NOT EXISTS edited_by INTEGER"))
         conn.execute(text("""
             DO $$
             BEGIN
@@ -124,7 +130,80 @@ class ClarityRequest(BaseModel):
     last_x_minutes: int | None = Field(default=None, ge=1)
 
 
+class TranscriptChunkUpdateRequest(BaseModel):
+    """Transcript Chunk Update Request Schema.
+
+    Attributes:
+        speaker (str | None): Optional updated speaker name string.
+        text (str | None): Optional updated utterance text string.
+    """
+    speaker: str | None = None
+    text: str | None = None
+
+
+class TranscriptChunkCreateRequest(BaseModel):
+    """Transcript Chunk Create Request Schema.
+
+    Attributes:
+        speaker (str): Speaker name string.
+        text (str): Utterance text string.
+        timestamp (datetime | None): Optional UTC timestamp.
+    """
+    speaker: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    timestamp: datetime | None = None
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def _check_can_edit_meeting(db: Any, user_id: int, meeting: Meeting) -> bool:
+    """Check whether user has admin/owner/creator privileges to edit meeting transcript/summary.
+
+    Args:
+        db: Active database session.
+        user_id (int): User ID to verify.
+        meeting (Meeting): Meeting instance.
+
+    Returns:
+        bool: True if authorized, False otherwise.
+    """
+    if meeting.team_id is not None:
+        from app.db.models import Team, TeamMembership
+        team = db.get(Team, meeting.team_id)
+        if team and team.owner_id == user_id:
+            return True
+        membership = db.execute(
+            select(TeamMembership).where(
+                TeamMembership.user_id == user_id,
+                TeamMembership.team_id == meeting.team_id,
+            )
+        ).scalar_one_or_none()
+        if membership and membership.role in {"admin", "owner"}:
+            return True
+        return False
+    else:
+        if meeting.created_by is None or meeting.created_by == user_id:
+            return True
+        return False
+
+
+def _assert_can_edit_meeting(db: Any, user_id: int, meeting: Meeting) -> None:
+    """Verify user has admin/owner permissions to edit transcript or trigger redo summary.
+
+    Args:
+        db: Active database session.
+        user_id (int): User ID to verify.
+        meeting (Meeting): Meeting instance.
+
+    Raises:
+        HTTPException: HTTP 403 Forbidden if not team admin/owner or meeting creator.
+    """
+    if not _check_can_edit_meeting(db, user_id, meeting):
+        raise HTTPException(
+            status_code=403,
+            detail="Only team admins or owners can edit transcripts or redo summaries",
+        )
 
 
 def _find_local_meeting_id(
@@ -648,11 +727,19 @@ def list_meetings(
                 if t:
                     topics.append({"id": t.id, "name": t.name, "color": t.color})
 
+            is_summarizing = (
+                (m.id in _resummarizing_tasks and not _resummarizing_tasks[m.id].done())
+                or m.status == "processing"
+                or (m.status == "completed" and not m.summary)
+            )
             result.append({
                 "id": m.id,
                 "title": m.title,
                 "status": m.status,
                 "summary": m.summary,
+                "is_summarizing": is_summarizing,
+                "summarizing_started_at": _resummarizing_start.get(m.id),
+                "discussion_log": m.discussion_log or [],
                 "team_id": m.team_id,
                 "created_at": m.created_at.isoformat() if m.created_at else None,
                 "topics": topics,
@@ -681,6 +768,7 @@ def get_meeting(
             raise HTTPException(status_code=404, detail="Meeting not found")
         if meeting.team_id:
             _assert_member(db, user_id, meeting.team_id)
+        can_edit = _check_can_edit_meeting(db, user_id, meeting)
         from app.db.models import Topic
         topic_rows = db.execute(
             select(meeting_topics).where(meeting_topics.c.meeting_id == meeting_id)
@@ -690,12 +778,22 @@ def get_meeting(
             t = db.get(Topic, row.topic_id)
             if t:
                 topics.append({"id": t.id, "name": t.name, "color": t.color})
+        is_summarizing = (
+            (meeting.id in _resummarizing_tasks and not _resummarizing_tasks[meeting.id].done())
+            or meeting.status == "processing"
+            or (meeting.status == "completed" and not meeting.summary)
+        )
         return {
             "id": meeting.id,
             "title": meeting.title,
             "status": meeting.status,
             "summary": meeting.summary,
+            "is_summarizing": is_summarizing,
+            "summarizing_started_at": _resummarizing_start.get(meeting.id),
+            "live_summary_thoughts": _active_summary_thoughts.get(meeting.id, []),
+            "discussion_log": meeting.discussion_log or [],
             "team_id": meeting.team_id,
+            "can_edit": can_edit,
             "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
             "topics": topics,
             "speakers": meeting.speakers or [],
@@ -703,7 +801,7 @@ def get_meeting(
 
 
 @app.patch("/api/meetings/{meeting_id}")
-def rename_meeting(
+def update_meeting(
     meeting_id: int,
     request: MeetingRenameRequest,
     user_id: int = Depends(get_current_user_id),
@@ -724,30 +822,31 @@ def rename_meeting(
             raise HTTPException(status_code=404, detail="Meeting not found")
         if meeting.team_id:
             _assert_member(db, user_id, meeting.team_id)
+        _assert_can_edit_meeting(db, user_id, meeting)
         meeting.title = request.title
         try:
             db.commit()
         except SQLAlchemyError as exc:
             db.rollback()
             raise HTTPException(
-                status_code=500, detail=f"Failed to rename meeting: {exc}"
+                status_code=500, detail=f"Failed to update meeting: {exc}"
             ) from exc
-    return {"id": meeting_id, "title": request.title}
+    return {"ok": True, "title": request.title}
 
 
 @app.delete("/api/meetings/{meeting_id}")
-def delete_meeting_record(
+def delete_meeting(
     meeting_id: int,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
-    """Delete meeting record and associated transcript chunks and action items.
+    """Permanently delete meeting record and all associated transcripts and action items.
 
     Args:
-        meeting_id (int): Target meeting primary key ID.
+        meeting_id (int): Primary key ID of meeting.
         user_id (int): Authenticated user ID.
 
     Returns:
-        dict[str, Any]: Success confirmation `{"ok": True}`.
+        dict[str, Any]: Status dictionary indicating successful deletion.
     """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
@@ -755,6 +854,7 @@ def delete_meeting_record(
             raise HTTPException(status_code=404, detail="Meeting not found")
         if meeting.team_id:
             _assert_member(db, user_id, meeting.team_id)
+        _assert_can_edit_meeting(db, user_id, meeting)
         try:
             db.delete(meeting)
             db.commit()
@@ -764,6 +864,173 @@ def delete_meeting_record(
                 status_code=500, detail=f"Failed to delete meeting: {exc}"
             ) from exc
     return {"ok": True}
+
+
+import time
+import asyncio
+
+_resummarizing_tasks: dict[int, asyncio.Task] = {}
+_resummarizing_start: dict[int, float] = {}
+_active_summary_thoughts: dict[int, list[dict[str, Any]]] = {}
+
+
+async def _resummarize_meeting_task(meeting_id: int, team_id: int | None) -> None:
+    """Background task to regenerate meeting summary without blocking HTTP gateway."""
+    _resummarizing_start[meeting_id] = time.time()
+    _active_summary_thoughts[meeting_id] = []
+
+    async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
+        _active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
+        try:
+            from app.api.ws_manager import manager
+            await manager.broadcast(meeting_id, {
+                "type": "summary_thought",
+                "thought": thought_dict,
+            })
+        except Exception as ws_err:
+            logger.debug("Failed to broadcast thought via ws: %s", ws_err)
+
+    try:
+        with SessionLocal() as db:
+            controller = ControllerAgent()
+            try:
+                await controller.generate_final_report(
+                    meeting_id, db, team_id=team_id, on_thought=on_summary_thought
+                )
+            except asyncio.CancelledError:
+                logger.info("[Resummarize] Task for meeting %s was cancelled by user", meeting_id)
+                raise
+            except Exception as exc:
+                logger.exception("Failed to resummarize meeting %s in background: %s", meeting_id, exc)
+    finally:
+        _resummarizing_tasks.pop(meeting_id, None)
+        _resummarizing_start.pop(meeting_id, None)
+
+
+@app.post("/api/meetings/{meeting_id}/resummarize")
+async def resummarize_meeting(
+    meeting_id: int,
+    background_tasks: BackgroundTasks,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Regenerate meeting summary and insights from current transcript chunks (admin/owner only).
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        background_tasks (BackgroundTasks): Background tasks manager.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Status dictionary indicating regeneration has started in background.
+    """
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        _assert_can_edit_meeting(db, user_id, meeting)
+        team_id = meeting.team_id
+
+        # Cancel any already-running task for this meeting
+        old_task = _resummarizing_tasks.get(meeting_id)
+        if old_task and not old_task.done():
+            old_task.cancel()
+
+        # Clear existing summary so frontend recognizes regeneration in progress
+        meeting.summary = None
+        db.commit()
+
+        _active_summary_thoughts[meeting_id] = []
+        task = asyncio.create_task(_resummarize_meeting_task(meeting_id, team_id))
+        _resummarizing_tasks[meeting_id] = task
+        _resummarizing_start[meeting_id] = time.time()
+
+        from app.db.models import Topic
+        topic_rows = db.execute(
+            select(meeting_topics).where(meeting_topics.c.meeting_id == meeting_id)
+        ).all()
+        topics = []
+        for row in topic_rows:
+            t = db.get(Topic, row.topic_id)
+            if t:
+                topics.append({"id": t.id, "name": t.name, "color": t.color})
+
+        return {
+            "ok": True,
+            "status": "processing",
+            "message": "Summary regeneration running in background.",
+            "meeting": {
+                "id": meeting.id,
+                "title": meeting.title,
+                "status": meeting.status,
+                "summary": None,
+                "is_summarizing": True,
+                "summarizing_started_at": _resummarizing_start.get(meeting_id),
+                "live_summary_thoughts": [],
+                "team_id": meeting.team_id,
+                "can_edit": True,
+                "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+                "topics": topics,
+                "speakers": meeting.speakers or [],
+            },
+        }
+
+
+@app.post("/api/meetings/{meeting_id}/stop-summary")
+def stop_summary_generation(
+    meeting_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Cancel any active background summary generation for a meeting.
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Cancellation status confirmation.
+    """
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        _assert_can_edit_meeting(db, user_id, meeting)
+
+    task = _resummarizing_tasks.get(meeting_id)
+    if task and not task.done():
+        task.cancel()
+        _resummarizing_tasks.pop(meeting_id, None)
+        _resummarizing_start.pop(meeting_id, None)
+        _active_summary_thoughts.pop(meeting_id, None)
+        return {"ok": True, "message": "Summary generation stopped successfully."}
+    return {"ok": True, "message": "No active summary generation to stop."}
+
+
+@app.get("/api/meetings/{meeting_id}/summary-thoughts")
+def get_summary_thoughts(
+    meeting_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Retrieve live thoughts generated during active summary synthesis.
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: List of thought records.
+    """
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting.team_id:
+            _assert_member(db, user_id, meeting.team_id)
+
+    return {
+        "ok": True,
+        "meeting_id": meeting_id,
+        "thoughts": _active_summary_thoughts.get(meeting_id, []),
+    }
 
 
 @app.get("/api/meetings/{meeting_id}/transcript")
@@ -778,7 +1045,7 @@ def get_transcript(
         user_id (int): Authenticated user ID.
 
     Returns:
-        dict[str, Any]: Dictionary containing list of transcript chunk items.
+        dict[str, Any]: Dictionary containing list of transcript chunk items and edit permissions.
     """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
@@ -786,6 +1053,7 @@ def get_transcript(
             raise HTTPException(status_code=404, detail="Meeting not found")
         if meeting.team_id:
             _assert_member(db, user_id, meeting.team_id)
+        can_edit = _check_can_edit_meeting(db, user_id, meeting)
         chunks = db.execute(
             select(TranscriptChunk)
             .where(TranscriptChunk.meeting_id == meeting_id)
@@ -794,15 +1062,256 @@ def get_transcript(
         return {
             "meeting_id": meeting_id,
             "status": meeting.status,
+            "can_edit": can_edit,
             "chunks": [
                 {
                     "id": c.id,
                     "speaker": c.speaker,
                     "text": c.text,
                     "timestamp": c.timestamp.isoformat() if hasattr(c.timestamp, "isoformat") else str(c.timestamp) if c.timestamp else None,
+                    "is_edited": bool(c.is_edited),
+                    "original_text": c.original_text,
+                    "original_speaker": c.original_speaker,
+                    "edited_at": c.edited_at.isoformat() if hasattr(c.edited_at, "isoformat") and c.edited_at else None,
                 }
                 for c in chunks
             ],
+        }
+
+
+@app.patch("/api/meetings/{meeting_id}/transcript/{chunk_id}")
+def update_transcript_chunk(
+    meeting_id: int,
+    chunk_id: int,
+    request: TranscriptChunkUpdateRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Edit a transcript chunk (admin/owner only). Preserves original text/speaker on first edit.
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        chunk_id (int): Primary key ID of target transcript chunk.
+        request (TranscriptChunkUpdateRequest): Payload containing new speaker/text.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Updated chunk dictionary with edited status and original versions.
+    """
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        _assert_can_edit_meeting(db, user_id, meeting)
+        chunk = db.get(TranscriptChunk, chunk_id)
+        if not chunk or chunk.meeting_id != meeting_id:
+            raise HTTPException(status_code=404, detail="Transcript chunk not found")
+
+        # Preserve original version if this is the first edit
+        if not chunk.is_edited or chunk.original_text is None:
+            chunk.original_text = chunk.text
+            chunk.original_speaker = chunk.speaker
+
+        if request.text is not None:
+            chunk.text = request.text.strip()
+        if request.speaker is not None:
+            chunk.speaker = request.speaker.strip()
+
+        from datetime import datetime, timezone
+        chunk.is_edited = True
+        chunk.edited_at = datetime.now(timezone.utc)
+        chunk.edited_by = user_id
+
+        # Update meeting speakers list if speaker was modified or added
+        if request.speaker and meeting.speakers is not None:
+            current_speakers = set(meeting.speakers)
+            current_speakers.add(chunk.speaker)
+            meeting.speakers = list(current_speakers)
+
+        try:
+            db.commit()
+            db.refresh(chunk)
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=500, detail=f"Failed to update transcript chunk: {exc}"
+            ) from exc
+
+        return {
+            "ok": True,
+            "chunk": {
+                "id": chunk.id,
+                "meeting_id": chunk.meeting_id,
+                "speaker": chunk.speaker,
+                "text": chunk.text,
+                "timestamp": chunk.timestamp.isoformat() if hasattr(chunk.timestamp, "isoformat") else str(chunk.timestamp) if chunk.timestamp else None,
+                "is_edited": chunk.is_edited,
+                "original_text": chunk.original_text,
+                "original_speaker": chunk.original_speaker,
+                "edited_at": chunk.edited_at.isoformat() if hasattr(chunk.edited_at, "isoformat") and chunk.edited_at else None,
+            },
+        }
+
+
+@app.post("/api/meetings/{meeting_id}/transcript/{chunk_id}/revert")
+def revert_transcript_chunk(
+    meeting_id: int,
+    chunk_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Revert an edited transcript chunk back to its original raw version (admin/owner only).
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        chunk_id (int): Primary key ID of target transcript chunk.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Reverted chunk dictionary.
+    """
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        _assert_can_edit_meeting(db, user_id, meeting)
+        chunk = db.get(TranscriptChunk, chunk_id)
+        if not chunk or chunk.meeting_id != meeting_id:
+            raise HTTPException(status_code=404, detail="Transcript chunk not found")
+
+        if chunk.is_edited and chunk.original_text is not None:
+            chunk.text = chunk.original_text
+            if chunk.original_speaker is not None:
+                chunk.speaker = chunk.original_speaker
+            chunk.is_edited = False
+            chunk.original_text = None
+            chunk.original_speaker = None
+            chunk.edited_at = None
+            chunk.edited_by = None
+
+            try:
+                db.commit()
+                db.refresh(chunk)
+            except SQLAlchemyError as exc:
+                db.rollback()
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to revert transcript chunk: {exc}"
+                ) from exc
+
+        return {
+            "ok": True,
+            "chunk": {
+                "id": chunk.id,
+                "meeting_id": chunk.meeting_id,
+                "speaker": chunk.speaker,
+                "text": chunk.text,
+                "timestamp": chunk.timestamp.isoformat() if hasattr(chunk.timestamp, "isoformat") else str(chunk.timestamp) if chunk.timestamp else None,
+                "is_edited": chunk.is_edited,
+                "original_text": chunk.original_text,
+                "original_speaker": chunk.original_speaker,
+                "edited_at": chunk.edited_at.isoformat() if hasattr(chunk.edited_at, "isoformat") and chunk.edited_at else None,
+            },
+        }
+
+
+@app.delete("/api/meetings/{meeting_id}/transcript/{chunk_id}")
+def delete_transcript_chunk(
+    meeting_id: int,
+    chunk_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Delete a transcript chunk from a meeting (admin/owner only).
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        chunk_id (int): Primary key ID of target transcript chunk.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Confirmation dictionary `{"ok": True}`.
+    """
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        _assert_can_edit_meeting(db, user_id, meeting)
+        chunk = db.get(TranscriptChunk, chunk_id)
+        if not chunk or chunk.meeting_id != meeting_id:
+            raise HTTPException(status_code=404, detail="Transcript chunk not found")
+
+        try:
+            db.delete(chunk)
+            db.commit()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=500, detail=f"Failed to delete transcript chunk: {exc}"
+            ) from exc
+
+        return {"ok": True}
+
+
+@app.post("/api/meetings/{meeting_id}/transcript")
+def create_transcript_chunk(
+    meeting_id: int,
+    request: TranscriptChunkCreateRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Manually insert a transcript chunk (admin/owner only).
+
+    Args:
+        meeting_id (int): Primary key ID of target meeting.
+        request (TranscriptChunkCreateRequest): Payload containing speaker, text, and optional timestamp.
+        user_id (int): Authenticated user ID.
+
+    Returns:
+        dict[str, Any]: Created transcript chunk dictionary.
+    """
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        _assert_can_edit_meeting(db, user_id, meeting)
+
+        from datetime import datetime, timezone
+        ts = request.timestamp or datetime.now(timezone.utc)
+        chunk = TranscriptChunk(
+            meeting_id=meeting_id,
+            speaker=request.speaker.strip(),
+            text=request.text.strip(),
+            timestamp=ts,
+            is_edited=True,
+            edited_at=datetime.now(timezone.utc),
+            edited_by=user_id,
+        )
+        db.add(chunk)
+
+        # Update speakers list
+        if meeting.speakers is None:
+            meeting.speakers = []
+        if chunk.speaker not in meeting.speakers:
+            meeting.speakers = list(meeting.speakers) + [chunk.speaker]
+
+        try:
+            db.commit()
+            db.refresh(chunk)
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=500, detail=f"Failed to create transcript chunk: {exc}"
+            ) from exc
+
+        return {
+            "ok": True,
+            "chunk": {
+                "id": chunk.id,
+                "meeting_id": chunk.meeting_id,
+                "speaker": chunk.speaker,
+                "text": chunk.text,
+                "timestamp": chunk.timestamp.isoformat() if hasattr(chunk.timestamp, "isoformat") else str(chunk.timestamp) if chunk.timestamp else None,
+                "is_edited": chunk.is_edited,
+                "original_text": chunk.original_text,
+                "original_speaker": chunk.original_speaker,
+                "edited_at": chunk.edited_at.isoformat() if hasattr(chunk.edited_at, "isoformat") and chunk.edited_at else None,
+            },
         }
 
 
@@ -834,6 +1343,21 @@ def list_all_actions(
 
         rows = db.execute(stmt).all()
 
+        meeting_ids = {a.meeting_id for a, _, _, _ in rows}
+        meeting_topics_map: dict[int, list[dict[str, Any]]] = {}
+        if meeting_ids:
+            topic_rows = db.execute(
+                select(meeting_topics.c.meeting_id, Topic.id, Topic.name, Topic.color)
+                .join(Topic, meeting_topics.c.topic_id == Topic.id)
+                .where(meeting_topics.c.meeting_id.in_(meeting_ids))
+            ).all()
+            for m_id, t_id, t_name, t_color in topic_rows:
+                meeting_topics_map.setdefault(m_id, []).append({
+                    "id": t_id,
+                    "name": t_name,
+                    "color": t_color,
+                })
+
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = {
             "parking_lot": {"pending": [], "accepted": [], "rejected": [], "archived": []},
             "to_do": {"pending": [], "accepted": [], "rejected": [], "archived": []},
@@ -853,6 +1377,7 @@ def list_all_actions(
                 "content": a.content,
                 "status": a.status,
                 "tags": a.tags or [],
+                "topics": meeting_topics_map.get(a.meeting_id, []),
                 "assignee": {
                     "id": u.id,
                     "name": u.name,
@@ -884,6 +1409,14 @@ def list_actions(
             raise HTTPException(status_code=404, detail="Meeting not found")
         if meeting.team_id:
             _assert_member(db, user_id, meeting.team_id)
+
+        topic_rows = db.execute(
+            select(Topic.id, Topic.name, Topic.color)
+            .join(meeting_topics, meeting_topics.c.topic_id == Topic.id)
+            .where(meeting_topics.c.meeting_id == meeting_id)
+        ).all()
+        m_topics = [{"id": t_id, "name": t_name, "color": t_color} for t_id, t_name, t_color in topic_rows]
+
         rows = db.execute(
             select(AgentAction, User)
             .outerjoin(User, AgentAction.assignee_id == User.id)
@@ -908,6 +1441,7 @@ def list_actions(
                 "content": a.content,
                 "status": a.status,
                 "tags": a.tags or [],
+                "topics": m_topics,
                 "assignee": {
                     "id": u.id,
                     "name": u.name,

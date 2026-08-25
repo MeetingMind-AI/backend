@@ -198,6 +198,19 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
                         "data": {"role": "scrum_master", "text": summary_text},
                     },
                 )
+                await manager.broadcast(
+                    meeting_id,
+                    {
+                        "event": "agent_thought",
+                        "data": {
+                            "agent": "scrum_master",
+                            "title": f"Context Insight from {speaker}",
+                            "text": summary_text,
+                            "speaker": speaker,
+                            "grounding": True,
+                        },
+                    },
+                )
 
             proposal_data = scrum.get("proposal")
             if proposal_data:
@@ -221,6 +234,20 @@ async def ingest_transcript(websocket: WebSocket, meeting_id: int) -> None:
                             "type": proposal_data["type"],
                             "content": proposal_data["content"],
                             "status": "pending",
+                        },
+                    },
+                )
+                await manager.broadcast(
+                    meeting_id,
+                    {
+                        "event": "agent_thought",
+                        "data": {
+                            "agent": "scrum_master",
+                            "title": f"Action Identified: [{proposal_data['type'].upper()}]",
+                            "text": f"Extracted actionable ticket: \"{proposal_data['content']}\" based on turn by {speaker}.",
+                            "speaker": speaker,
+                            "action": proposal_data["type"].upper(),
+                            "grounding": True,
                         },
                     },
                 )

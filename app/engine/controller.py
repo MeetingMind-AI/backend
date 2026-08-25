@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 
 import httpx
 from mem0 import Memory
@@ -328,6 +329,7 @@ class DiscussionEngine:
         num_rounds: int,
         team_prompts: dict[str, str] | None = None,
         model: str | None = None,
+        on_thought: Any | None = None,
     ) -> list[dict[str, str]]:
         """Execute specified number of cross-functional debate rounds between Tech Lead and PM personas.
 
@@ -338,6 +340,7 @@ class DiscussionEngine:
             num_rounds (int): Number of discussion rounds to run.
             team_prompts (dict[str, str] | None): Team prompt overrides dictionary.
             model (str | None): Optional LLM model identifier override.
+            on_thought (Any | None): Optional callback to emit live deliberation thoughts.
 
         Returns:
             list[dict[str, str]]: List of discussion round logs containing Tech Lead and PM responses.
@@ -373,6 +376,23 @@ class DiscussionEngine:
                 print(
                     f"[Discussion] meeting={meeting_id} round={round_num} {label}: {preview}..."
                 )
+
+                if on_thought and response:
+                    t_payload = {
+                        "id": f"thought-debate-r{round_num}-{role}-{int(time.time()*1000)}",
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "agent": role,
+                        "title": f"Round {round_num} {label} Deliberation",
+                        "text": response.strip(),
+                        "stage": "debate",
+                    }
+                    try:
+                        if asyncio.iscoroutinefunction(on_thought):
+                            await on_thought(t_payload)
+                        else:
+                            on_thought(t_payload)
+                    except Exception as err:
+                        logger.debug("Error in on_thought during debate: %s", err)
 
             log.append(entry)
 
@@ -840,6 +860,7 @@ class ControllerAgent:
         db_session: Session,
         num_rounds: int | None = None,
         team_id: int | None = None,
+        on_thought: Any | None = None,
     ) -> str:
         """Orchestrate complete post-meeting pipeline: initial persona analyses, cross-functional debate, final synthesis, DB persistence, Mem0 storage, and email notification.
 
@@ -848,6 +869,7 @@ class ControllerAgent:
             db_session (Session): Active database session.
             num_rounds (int | None): Number of debate rounds between Tech Lead and PM.
             team_id (int | None): Team ID for prompt config and email notification dispatch.
+            on_thought (Any | None): Optional live thought streaming callback.
 
         Returns:
             str: JSON string containing complete final report JSON object.
@@ -866,6 +888,23 @@ class ControllerAgent:
         # Check transcript threshold to prevent hallucinations on trivial / empty meetings
         MIN_REPORT_WORD_COUNT = 25
         word_count = len(transcript.split()) if transcript else 0
+
+        if on_thought:
+            t_payload = {
+                "id": f"thought-ingest-{int(time.time()*1000)}",
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "agent": "scrum_master",
+                "title": "Context Ingestion & Vector Search",
+                "text": f"Ingested {word_count} words from transcript timeline. Searching vector database for team memories & prior context.",
+                "stage": "transcript",
+            }
+            try:
+                if asyncio.iscoroutinefunction(on_thought):
+                    await on_thought(t_payload)
+                else:
+                    on_thought(t_payload)
+            except Exception as err:
+                logger.debug("Error emitting ingest thought: %s", err)
 
         if not transcript or word_count < MIN_REPORT_WORD_COUNT:
             summary_msg = (
@@ -914,7 +953,7 @@ class ControllerAgent:
             f"--- RELEVANT PAST MEMORIES & BACKGROUND (Reference Only) ---\n{past_memories}\n\n"
             f"--- CURRENT TRANSCRIPT (Primary Source) ---\n{transcript}"
         )
-        initial_reports = await self._run_initial_analyses(base_prompt, prompts)
+        initial_reports = await self._run_initial_analyses(base_prompt, prompts, on_thought=on_thought)
 
         # 3. Discussion rounds (Tech Lead ↔ PM)
         discussion_log: list[dict[str, str]] = []
@@ -929,9 +968,27 @@ class ControllerAgent:
                 num_rounds=num_rounds,
                 team_prompts=prompts,
                 model=self._llm.final_model,
+                on_thought=on_thought,
             )
 
         # 4. Scrum Master synthesis
+        if on_thought:
+            t_payload = {
+                "id": f"thought-synthesis-start-{int(time.time()*1000)}",
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "agent": "scrum_master",
+                "title": "Master Synthesis in Progress",
+                "text": "Scrum Master synthesizing Tech Lead constraints, Product Manager scope, and cross-functional agreements into final action items and executive digest.",
+                "stage": "synthesis",
+            }
+            try:
+                if asyncio.iscoroutinefunction(on_thought):
+                    await on_thought(t_payload)
+                else:
+                    on_thought(t_payload)
+            except Exception as err:
+                logger.debug("Error emitting synthesis start thought: %s", err)
+
         synthesis_prompt = ReportPromptBuilder.build(
             meeting_id,
             initial_reports,
@@ -943,6 +1000,31 @@ class ControllerAgent:
             system_prompt=prompts["synthesis"],
             model=self._llm.final_model,
         )
+
+        if on_thought:
+            sm_summary = ""
+            try:
+                parsed_sm = json.loads(scrum_master_result.strip().replace('```json', '').replace('```', ''))
+                if isinstance(parsed_sm, dict) and parsed_sm.get('summary'):
+                    sm_summary = parsed_sm['summary']
+            except Exception:
+                sm_summary = scrum_master_result[:300]
+
+            t_payload = {
+                "id": f"thought-synthesis-done-{int(time.time()*1000)}",
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "agent": "scrum_master",
+                "title": "Consensus & Executive Synthesis Finalized",
+                "text": sm_summary or "Executive digest and action items compiled successfully.",
+                "stage": "synthesis",
+            }
+            try:
+                if asyncio.iscoroutinefunction(on_thought):
+                    await on_thought(t_payload)
+                else:
+                    on_thought(t_payload)
+            except Exception as err:
+                logger.debug("Error emitting synthesis done thought: %s", err)
 
         # 5. Assemble and persist
         report = {**initial_reports, "scrum_master": scrum_master_result}
@@ -977,12 +1059,18 @@ class ControllerAgent:
 
     # -- private helpers ---------------------------------------------------
 
-    async def _run_initial_analyses(self, prompt: str, team_prompts: dict[str, str] | None = None) -> dict[str, str]:
+    async def _run_initial_analyses(
+        self,
+        prompt: str,
+        team_prompts: dict[str, str] | None = None,
+        on_thought: Any | None = None,
+    ) -> dict[str, str]:
         """Run parallel initial independent analyses for Tech Lead and Product Manager personas.
 
         Args:
             prompt (str): Context prompt string containing meeting ID, memories, and transcript.
             team_prompts (dict[str, str] | None): Team prompt overrides dictionary.
+            on_thought (Any | None): Optional thought streaming callback.
 
         Returns:
             dict[str, str]: Map of persona role name to initial analysis JSON text.
@@ -1003,11 +1091,49 @@ class ControllerAgent:
                 tuple[str, str]: Tuple of (role, analysis_text).
             """
             try:
-                return role, await self._llm.generate(
+                result_text = await self._llm.generate(
                     prompt=prompt,
                     system_prompt=sys_prompt,
                     model=self._llm.final_model,
                 )
+
+                if on_thought and result_text:
+                    label = "Tech Lead" if role == "tech_lead" else "Product Manager"
+                    title = "Tech Lead Architectural Assessment" if role == "tech_lead" else "Product Manager Scope Evaluation"
+                    summary_text = result_text.strip()
+                    try:
+                        clean_json = result_text.strip()
+                        if clean_json.startswith('```'):
+                            clean_json = clean_json.replace('```json', '').replace('```', '').strip()
+                        parsed = json.loads(clean_json)
+                        if isinstance(parsed, dict):
+                            parts = []
+                            for k, v in parsed.items():
+                                if isinstance(v, list) and v:
+                                    items = [str(x.get('decision', x.get('feature', x.get('blocker', str(x))))) if isinstance(x, dict) else str(x) for x in v[:3]]
+                                    parts.append(f"**{k.replace('_', ' ').title()}**: " + ", ".join(items))
+                            if parts:
+                                summary_text = "\n".join(parts)
+                    except Exception:
+                        pass
+
+                    t_payload = {
+                        "id": f"thought-initial-{role}-{int(time.time()*1000)}",
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "agent": role,
+                        "title": title,
+                        "text": summary_text,
+                        "stage": "personas",
+                    }
+                    try:
+                        if asyncio.iscoroutinefunction(on_thought):
+                            await on_thought(t_payload)
+                        else:
+                            on_thought(t_payload)
+                    except Exception as err:
+                        logger.debug("Error emitting initial thought: %s", err)
+
+                return role, result_text
             except Exception as exc:
                 print(f"[Final Report] Persona {role} failed: {exc}")
                 return role, "{}"

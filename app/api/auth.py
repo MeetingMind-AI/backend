@@ -142,6 +142,18 @@ class LoginRequest(BaseModel):
         return v.strip().lower()
 
 
+class UserUpdateRequest(BaseModel):
+    """User Profile Update Request Schema.
+
+    Attributes:
+        name (str | None): Updated full display name.
+        photo_b64 (str | None): Base64-encoded profile picture image data.
+    """
+
+    name: str | None = None
+    photo_b64: str | None = None
+
+
 @router.post("/signup")
 def signup(req: SignupRequest, response: Response) -> dict[str, Any]:
     """Register a new user account and set auth cookie.
@@ -277,6 +289,53 @@ def get_me(user_id: int = Depends(get_current_user_id)) -> dict[str, Any]:
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         return _user_out(user)
+
+
+@router.patch("/me")
+def update_me(
+    req: UserUpdateRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Update profile information (name, avatar photo) for current user.
+
+    Args:
+        req (UserUpdateRequest): Profile update payload.
+        user_id (int): Primary key ID of authenticated user from dependency.
+
+    Returns:
+        dict[str, Any]: Dictionary containing updated user profile attributes.
+
+    Raises:
+        HTTPException: 404 if user not found, 413 if photo too large, 422 if invalid photo.
+    """
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if req.name is not None:
+            name_clean = req.name.strip()
+            if not name_clean:
+                raise HTTPException(status_code=422, detail="Name cannot be empty")
+            user.name = name_clean
+
+        if req.photo_b64 is not None:
+            if req.photo_b64 == "":
+                user.photo = None
+            else:
+                try:
+                    photo = base64.b64decode(req.photo_b64)
+                except Exception:
+                    raise HTTPException(status_code=422, detail="Invalid photo encoding")
+                if len(photo) > _MAX_PHOTO_BYTES:
+                    raise HTTPException(
+                        status_code=413, detail="Photo too large (max 500 KB)"
+                    )
+                user.photo = photo
+
+        db.commit()
+        db.refresh(user)
+        return {"user": _user_out(user)}
 
 
 @router.get("/photo/{user_id}")
