@@ -896,7 +896,7 @@ async def poll_transcripts_from_vexa(
                             continue
 
                         chunk_data = {
-                            "id": c.timestamp.isoformat(),
+                            "id": c.id,
                             "speaker": c.speaker,
                             "text": c.text,
                             "timestamp": c.timestamp.isoformat(),

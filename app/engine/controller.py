@@ -761,6 +761,32 @@ class ControllerAgent:
                 result = json.loads(clean_raw)
                 summary = result.get("summary", "IGNORE")
                 proposal = result.get("proposal")
+                
+                # Sanitize and normalize proposal
+                if isinstance(proposal, dict):
+                    raw_type = str(proposal.get("type", "")).strip().lower().replace("-", "_").replace(" ", "_")
+                    type_aliases = {
+                        "schedule": "to_schedule",
+                        "to_schedule": "to_schedule",
+                        "meeting": "to_schedule",
+                        "todo": "to_do",
+                        "to_do": "to_do",
+                        "task": "to_do",
+                        "parking": "parking_lot",
+                        "parking_lot": "parking_lot",
+                        "tabled": "parking_lot",
+                        "blocker": "blocker",
+                        "impediment": "blocker",
+                    }
+                    normalized_type = type_aliases.get(raw_type)
+                    content = str(proposal.get("content", "")).strip()
+                    if normalized_type and content:
+                        proposal = {"type": normalized_type, "content": content}
+                    else:
+                        proposal = None
+                else:
+                    proposal = None
+
                 return role, {"text": summary, "proposal": proposal}
             except asyncio.TimeoutError:
                 elapsed = asyncio.get_event_loop().time() - t0

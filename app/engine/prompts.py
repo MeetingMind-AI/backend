@@ -12,13 +12,13 @@ Provides `get_team_prompts()` to load team-specific prompt customizations from d
 # ---------------------------------------------------------------------------
 
 REALTIME_SCRUM_MASTER_PROMPT = (
-    "You are an Agile Scrum Master monitoring a live meeting.\n"
+    "You are an Agile Scrum Master monitoring a live meeting in real time.\n"
     "<system_formatting_rules>\n"
     "- Return exactly one JSON object.\n"
-    "- No markdown.\n"
+    "- No markdown formatting or code blocks.\n"
     "- No conversational filler.\n"
     "- No extra keys, prose, or explanation outside JSON.\n"
-    "- Response must be parseable by JSON.parse().\n"
+    "- Response must be directly parseable by JSON.parse().\n"
     "</system_formatting_rules>\n\n"
     "<json_schema_enforcement>\n"
     "{\n"
@@ -36,7 +36,7 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     '          "additionalProperties": false,\n'
     '          "required": ["type", "content"],\n'
     '          "properties": {\n'
-    '            "type": {"enum": ["parking_lot", "to_do", "to_schedule", "blocker"]},\n'
+    '            "type": {"enum": ["to_schedule", "to_do", "parking_lot", "blocker"]},\n'
     '            "content": {"type": "string"}\n'
     "          }\n"
     "        }\n"
@@ -45,11 +45,13 @@ REALTIME_SCRUM_MASTER_PROMPT = (
     "  }\n"
     "}\n"
     "</json_schema_enforcement>\n\n"
-    "Interpretation guidance: summary is one sentence describing the utterance's key task, blocker, ticket, or deadline. "
-    "If the utterance is greeting/filler/chit-chat/agreement (e.g., 'that is what we need', 'that is my piece', 'sounds good', 'okay'), set summary to 'IGNORE' and set proposal to null. "
-    "Do NOT use past context to invent or attribute proposals to generic agreements or filler utterances. "
-    "If actionable, set proposal.type to parking_lot, to_do, to_schedule, or blocker with a short paraphrased content string grounded strictly and only in the explicit content of the current utterance. "
-    "Use 'blocker' when you detect that the conversation is not moving, the team is talking in circles, or a clear blocker is stated."
+    "Classification & Extraction Rules:\n"
+    "1. 'summary': One concise sentence summarizing the main point of the utterance. If the utterance is purely greeting, pleasantry, conversational agreement, or filler (e.g. 'sounds good', 'okay', 'yes', 'that makes sense', 'thanks'), set summary to 'IGNORE' and proposal to null.\n"
+    "2. 'to_schedule': Triggers whenever a speaker suggests, requests, or mentions scheduling, setting up, or holding a future meeting, sync, call, demo, or follow-up (e.g., 'Let\\'s schedule a meeting for tomorrow', 'We need to set up a sync with design', 'Let\\'s meet next Monday'). proposal.type MUST be 'to_schedule' and proposal.content should be a concise action description (e.g. 'Schedule follow-up meeting for tomorrow').\n"
+    "3. 'to_do': Triggers whenever a speaker commits to a task, action item, documentation, PR review, or work deliverable (e.g., 'We have to do the documentation', 'I will fix the bug today', 'Please submit the PR'). proposal.type MUST be 'to_do' and proposal.content should describe the action item.\n"
+    "4. 'parking_lot': Triggers whenever a topic is deferred, tabled, parked, or moved offline (e.g., 'Let\\'s table this discussion for later', 'Park this topic for the next sprint'). proposal.type MUST be 'parking_lot'.\n"
+    "5. 'blocker': Triggers whenever an impediment, dependency, or blocker is stated (e.g., 'I am blocked by missing API keys', 'We cannot deploy because the build failed'). proposal.type MUST be 'blocker'.\n"
+    "6. Whenever an utterance contains an actionable item, meeting scheduling request, task, or blocker, you MUST create a proposal object and NOT leave proposal as null."
 )
 
 REALTIME_PERSONA_PROMPTS = {
@@ -210,12 +212,12 @@ DISCUSSION_PERSONA_PROMPTS = {
 # ---------------------------------------------------------------------------
 
 REALTIME_USER_PROMPT = (
-    "Transcript:\n{transcript}\n\n"
+    "Transcript Utterance:\n{transcript}\n\n"
     "{pre_meeting_context}\n\n"
-    "Analyze the utterance above. The pre-meeting context is provided for background reference ONLY (e.g. recognizing project names). "
-    "You MUST NOT extract proposals or summaries from the pre-meeting context unless the current transcript explicitly discusses them. "
-    "If the transcript contains only filler words, agreements (e.g., 'yes', 'okay', 'that is what we need', 'that is my piece'), "
-    "or lacks actionable technical/product substance, you MUST set summary to 'IGNORE' and proposal to null."
+    "Analyze the utterance above. The pre-meeting context is provided for background reference ONLY. "
+    "You MUST NOT extract proposals from the pre-meeting context unless the current transcript utterance explicitly mentions them. "
+    "If the current utterance mentions scheduling a meeting, committing to a task or documentation, parking a topic, or encountering a blocker, create the corresponding proposal object. "
+    "If the transcript contains only greetings, generic agreements (e.g., 'yes', 'okay', 'sounds good'), or filler words without any action or topic, set summary to 'IGNORE' and proposal to null."
 )
 
 INSTANT_CLARITY_USER_PROMPT = (
