@@ -48,6 +48,8 @@ def is_meeting_summarizing(meeting_id: int, status: str | None) -> bool:
     task = summary_tasks.get(meeting_id)
     if task and not task.done():
         return True
+    if meeting_id in finalizing_meetings:
+        return True
     if status == "processing":
         return True
     return False

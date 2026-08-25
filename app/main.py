@@ -17,6 +17,7 @@ action item management, and service health checks.
 import asyncio
 from datetime import datetime
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
@@ -499,21 +500,21 @@ async def _finalize_meeting(
         logger.info(f"[Leave] Finalization already running for meeting {meeting_id}; skipping")
         return
     finalizing_meetings.add(meeting_id)
-    summary_starts.setdefault(meeting_id, time.time())
-    active_summary_thoughts[meeting_id] = []
-
-    async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
-        active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
-        try:
-            from app.api.ws_manager import manager
-            await manager.broadcast(meeting_id, {
-                "type": "summary_thought",
-                "thought": thought_dict,
-            })
-        except Exception as ws_err:
-            logger.debug("Failed to broadcast thought via ws: %s", ws_err)
-
     try:
+        summary_starts.setdefault(meeting_id, time.time())
+        active_summary_thoughts[meeting_id] = []
+
+        async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
+            active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
+            try:
+                from app.api.ws_manager import manager
+                await manager.broadcast(meeting_id, {
+                    "type": "summary_thought",
+                    "thought": thought_dict,
+                })
+            except Exception as ws_err:
+                logger.debug("Failed to broadcast thought via ws: %s", ws_err)
+
         update_meeting_status(meeting_id, "completed")
 
         if platform and native_id and api_key:
@@ -895,21 +896,21 @@ def delete_meeting(
 
 async def _resummarize_meeting_task(meeting_id: int, team_id: int | None) -> None:
     """Background task to regenerate meeting summary without blocking HTTP gateway."""
-    summary_starts[meeting_id] = time.time()
-    active_summary_thoughts[meeting_id] = []
-
-    async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
-        active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
-        try:
-            from app.api.ws_manager import manager
-            await manager.broadcast(meeting_id, {
-                "type": "summary_thought",
-                "thought": thought_dict,
-            })
-        except Exception as ws_err:
-            logger.debug("Failed to broadcast thought via ws: %s", ws_err)
-
     try:
+        summary_starts[meeting_id] = time.time()
+        active_summary_thoughts[meeting_id] = []
+
+        async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
+            active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
+            try:
+                from app.api.ws_manager import manager
+                await manager.broadcast(meeting_id, {
+                    "type": "summary_thought",
+                    "thought": thought_dict,
+                })
+            except Exception as ws_err:
+                logger.debug("Failed to broadcast thought via ws: %s", ws_err)
+
         with SessionLocal() as db:
             controller = ControllerAgent()
             try:
