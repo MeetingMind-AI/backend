@@ -1,3 +1,19 @@
+"""
+Email Notification and Digest Generation Module.
+
+Constructs self-contained, responsive HTML meeting summaries and delivers them
+via the Resend HTTP API (https://resend.com).  Uses inline CSS styles and HTML
+table-based layouts to ensure consistent rendering across legacy and modern email
+clients (e.g., Outlook, Gmail, Apple Mail).
+
+Why Resend HTTP API instead of SMTP (sendmail / smtplib):
+    Cloud and container hosting environments (AWS, GCP, Railway, Render, Fly.io)
+    block outbound TCP ports 25, 465, and 587 by default to combat spam originating
+    from hosted servers.  Resend delivers email over HTTPS port 443, which is never
+    blocked, making it the only reliable approach for containerized deployments
+    without dedicated IP reputation management.
+"""
+
 from __future__ import annotations
 
 import json
@@ -8,6 +24,17 @@ import httpx
 
 
 def _parse_json_field(raw: Any) -> dict | None:
+    """Safely decode structured summary payloads from database JSON or string fields.
+
+    Handles instances where LLMs return markdown-fenced code blocks (```json ... ```)
+    or where the database column contains raw dicts or serialized strings.
+
+    Args:
+        raw (Any): Raw database field value (dict, JSON string, or None).
+
+    Returns:
+        dict | None: Parsed dictionary if valid JSON, otherwise None.
+    """
     if not raw:
         return None
     if isinstance(raw, dict):
@@ -15,15 +42,27 @@ def _parse_json_field(raw: Any) -> dict | None:
     if isinstance(raw, str):
         try:
             clean = raw.strip()
+            # Strip markdown code fences (```json ... ``` or ``` ... ```) often emitted by LLMs
             if clean.startswith("```"):
                 clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             return json.loads(clean)
         except (json.JSONDecodeError, IndexError):
+            # Fallback for malformed or truncated LLM output
             return None
     return None
 
 
 def _badge(text: str, color: str, bg: str) -> str:
+    """Render an inline-styled badge pill for email clients.
+
+    Args:
+        text (str): Label text displayed inside the badge.
+        color (str): Hex font color.
+        bg (str): Hex background fill color.
+
+    Returns:
+        str: Raw HTML span string with inline CSS styling.
+    """
     return (
         f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;'
         f'font-size:10px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;'
@@ -32,14 +71,25 @@ def _badge(text: str, color: str, bg: str) -> str:
 
 
 def _suggestion_badge() -> str:
+    """Render status badge for pending or unconfirmed action proposals."""
     return _badge("Suggestion", "#92400e", "#fef3c7")
 
 
 def _approved_badge() -> str:
+    """Render status badge for approved team action items."""
     return _badge("Approved", "#065f46", "#d1fae5")
 
 
 def _action_rows(actions: list[dict]) -> str:
+    """Format a list of action item records into styled HTML list rows.
+
+    Args:
+        actions (list[dict]): List of action item dictionaries containing
+            status, assignee, and content fields.
+
+    Returns:
+        str: HTML markup string containing action item cards.
+    """
     if not actions:
         return '<p style="color:#9ca3af;font-size:13px;margin:0;">None.</p>'
     rows = []
@@ -66,6 +116,17 @@ def _action_rows(actions: list[dict]) -> str:
 
 
 def _section(title: str, svg_path: str, content: str, accent: str) -> str:
+    """Build a branded section card with an inline SVG icon, title header, and content.
+
+    Args:
+        title (str): Section header title (e.g. 'Executive Summary').
+        svg_path (str): SVG path/geometry elements for the header icon.
+        content (str): HTML body content for the section.
+        accent (str): Hex color accent for borders, icons, and backgrounds.
+
+    Returns:
+        str: HTML section block string.
+    """
     return (
         f'<div style="margin-bottom:32px;">'
         f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;'
@@ -83,6 +144,26 @@ def _section(title: str, svg_path: str, content: str, accent: str) -> str:
 
 
 def build_email_html(meeting: dict, actions: dict) -> str:
+    """Assemble a standalone, responsive HTML digest of meeting summaries and action items.
+
+    Renders Executive Summary, Technical Decisions, Business Decisions, Action Items,
+    Parking Lot, and To Schedule sections with inline styles and table-based geometry.
+
+    Email client cross-compatibility rationale:
+        Most desktop and mobile email clients (such as Microsoft Outlook, Gmail, and Yahoo)
+        strip out external stylesheets and <style> tags, or do not support modern CSS
+        features like CSS Grid or Flexbox in the root container. To guarantee pixel-perfect,
+        uniform rendering across all web and desktop mail clients, the layout uses nested
+        HTML tables with cellpadding=0, cellspacing=0, and explicit inline styles.
+
+    Args:
+        meeting (dict): Meeting dictionary containing title, created_at, and summary fields.
+        actions (dict): Grouped action items dictionary categorized into 'to_do',
+            'parking_lot', and 'to_schedule' with 'accepted' and 'pending' buckets.
+
+    Returns:
+        str: Complete, valid HTML5 document ready for email dispatch.
+    """
     raw_title = meeting.get("title", "Meeting")
     title = ":".join(raw_title.split(":")[1:]) if ":" in raw_title else raw_title
 
@@ -297,6 +378,24 @@ def build_email_html(meeting: dict, actions: dict) -> str:
 
 
 async def send_meeting_email(to_emails: list[str], subject: str, html: str) -> None:
+    """Dispatch meeting summary digest email to recipients via the Resend HTTP API.
+
+    Resend HTTP API error handling rationale:
+        The integration checks for the presence of RESEND_API_KEY before initiating HTTP traffic.
+        Network requests use a strict 20.0s async client timeout. Non-2xx HTTP responses
+        (e.g., 401 invalid API key, 422 unverified sender domain, 429 rate limit exceeded)
+        are captured and raised as descriptive RuntimeError instances including HTTP status
+        codes and error payload details, allowing upstream API endpoints to return appropriate
+        HTTP 502/503 status codes.
+
+    Args:
+        to_emails (list[str]): Recipient email address list.
+        subject (str): Email subject line.
+        html (str): Complete HTML email body content.
+
+    Raises:
+        RuntimeError: If RESEND_API_KEY is missing or the Resend API responds with an error.
+    """
     api_key = os.getenv("RESEND_API_KEY", "")
     if not api_key:
         raise RuntimeError("RESEND_API_KEY not configured — add it to .env")
@@ -309,5 +408,7 @@ async def send_meeting_email(to_emails: list[str], subject: str, html: str) -> N
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={"from": from_addr, "to": to_emails, "subject": subject, "html": html},
         )
+        # Resend returns JSON with 'id' on 200/201. Raise on non-2xx status to bubble upstream
         if not resp.is_success:
             raise RuntimeError(f"Resend API error {resp.status_code}: {resp.text}")
+

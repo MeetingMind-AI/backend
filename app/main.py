@@ -187,6 +187,9 @@ def _check_can_edit_meeting(db: Any, user_id: int, meeting: Meeting) -> bool:
     Returns:
         bool: True if authorized, False otherwise.
     """
+    # Role-based governance check:
+    # Restricts destructive/high-compute operations (transcript editing, deletion, re-summarization)
+    # to team owners, admins, and scrum masters, or the meeting creator for team-less meetings.
     if meeting.team_id is not None:
         from app.db.models import Team, TeamMembership
         team = db.get(Team, meeting.team_id)
@@ -209,6 +212,11 @@ def _check_can_edit_meeting(db: Any, user_id: int, meeting: Meeting) -> bool:
 
 def _assert_can_edit_meeting(db: Any, user_id: int, meeting: Meeting) -> None:
     """Verify user has admin/owner permissions to edit transcript or trigger redo summary.
+
+    Enforces meeting modification boundaries:
+        - Team workspaces: Restricted to team owners, team admins, or scrum masters.
+        - Personal meetings: Restricted to the original meeting creator.
+        Prevents regular viewers from modifying audited records or launching heavy LLM tasks.
 
     Args:
         db: Active database session.
@@ -916,11 +924,21 @@ def delete_meeting(
 
 
 async def _resummarize_meeting_task(meeting_id: int, team_id: int | None) -> None:
-    """Background task to regenerate meeting summary without blocking HTTP gateway."""
+    """Background task to regenerate meeting summary without blocking HTTP gateway.
+
+    Lifecycle:
+        1. Initializes active_summary_thoughts and records starting timestamp.
+        2. Streams live persona reasoning thoughts via WebSocket manager.broadcast().
+        3. Invokes ControllerAgent.generate_final_report with full multi-agent BOLAA debate.
+        4. Handles asyncio.CancelledError cleanly if user clicks 'Stop Summary'.
+        5. Finally block guarantees cleanup of tracking dictionaries to prevent memory leaks.
+    """
     try:
         summary_starts[meeting_id] = time.time()
         active_summary_thoughts[meeting_id] = []
 
+        # Real-time thought streaming callback: captures multi-agent debate thoughts
+        # and broadcasts them instantly over WebSocket to connected frontend clients.
         async def on_summary_thought(thought_dict: dict[str, Any]) -> None:
             active_summary_thoughts.setdefault(meeting_id, []).append(thought_dict)
             try:
@@ -944,6 +962,7 @@ async def _resummarize_meeting_task(meeting_id: int, team_id: int | None) -> Non
             except Exception as exc:
                 logger.exception("Failed to resummarize meeting %s in background: %s", meeting_id, exc)
     finally:
+        # Guaranteed cleanup: ensure registry keys are removed on completion, error, or cancellation
         summary_tasks.pop(meeting_id, None)
         summary_starts.pop(meeting_id, None)
 
@@ -1154,7 +1173,10 @@ def update_transcript_chunk(
         if not chunk or chunk.meeting_id != meeting_id:
             raise HTTPException(status_code=404, detail="Transcript chunk not found")
 
-        # Preserve original version if this is the first edit
+        # Transcript revision audit trail mechanism:
+        # On first edit, freeze the raw speech-to-text text and diarized speaker into
+        # original_text and original_speaker. Subsequent edits update text/speaker but leave
+        # the initial raw capture intact, enabling non-destructive edits and lossless revert.
         if not chunk.is_edited or chunk.original_text is None:
             chunk.original_text = chunk.text
             chunk.original_speaker = chunk.speaker
@@ -1225,6 +1247,8 @@ def revert_transcript_chunk(
         if not chunk or chunk.meeting_id != meeting_id:
             raise HTTPException(status_code=404, detail="Transcript chunk not found")
 
+        # Lossless revert: Restore text and speaker to original STT values,
+        # reset is_edited flag, and clear editor attribution metadata.
         if chunk.is_edited and chunk.original_text is not None:
             chunk.text = chunk.original_text
             if chunk.original_speaker is not None:

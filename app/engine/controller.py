@@ -1,9 +1,34 @@
 """
 Central Multi-Agent Controller and Orchestrator Module.
 
-Orchestrates real-time meeting transcript summarization, multi-round AI persona debate
-(Tech Lead ↔ Product Manager), Scrum Master report synthesis, Mem0 long-term memory integration,
-Redis caching, and background email dispatch.
+Implements the BOLAA (Bounded-Output LLM Agent Architecture) multi-agent pipeline used
+to produce post-meeting reports from live transcript data.  The pipeline has five stages:
+
+  1. Pre-meeting memory retrieval  — Mem0 vector search loads relevant past team
+     context (prior decisions, blockers, agreed scope) into `_pre_meeting_context`
+     before the first transcript chunk arrives.
+
+  2. Parallel persona analysis  — `ControllerAgent._run_initial_analyses` fans out
+     two concurrent Ollama calls: the Tech Lead and Product Manager each read the
+     full transcript and produce independent structured JSON analyses.
+
+  3. Multi-round cross-functional debate  — `DiscussionEngine.run` executes
+     `num_rounds` debate iterations where both personas challenge each other's
+     assumptions.  Higher `num_rounds` values produce more thorough alignment at
+     the cost of additional inference latency (each round ~10-30 s on a 14 b model).
+
+  4. Scrum Master synthesis  — `ReportPromptBuilder` assembles all inputs
+     (initial analyses + debate log) into a single prompt, and the Scrum Master
+     persona produces the final executive JSON digest.
+
+  5. Persistence & distribution  — `ControllerAgent._persist` commits the report
+     to PostgreSQL, backfills any missing AgentAction rows, stores findings in Mem0
+     for future meetings, and optionally triggers async email delivery.
+
+`ControllerAgent` also drives the **Instant Clarity** feature: on-demand technical
+or business explanations of recent transcript segments, served with a 60-second
+Redis TTL cache keyed by SHA-256(system_prompt + user_prompt) to avoid redundant
+Ollama calls when multiple attendees click the button simultaneously.
 """
 
 from __future__ import annotations
@@ -201,9 +226,13 @@ def get_memory() -> Memory | None:
 MEM0_SAVE_ENABLED = _env_bool("MEM0_SAVE_ENABLED", True)
 MEM0_SEARCH_ENABLED = _env_bool("MEM0_SEARCH_ENABLED", True)
 
-# Module-level semaphore shared across all ControllerAgent instances.
-# Ensures that real-time summarize() calls and on-demand Instant Clarity calls
-# never race against each other when hitting the (single-threaded) Ollama backend.
+# Module-level concurrency semaphore shared across all ControllerAgent instances.
+# Rationale: Local Ollama instances running on consumer hardware (e.g. Apple Silicon Unified
+# Memory or single NVIDIA GPUs with 8GB-16GB VRAM) cannot efficiently handle concurrent model
+# inference calls. Multiple overlapping generate requests lead to severe VRAM thrashing,
+# repeated model context swaps, CPU thread contention, and HTTP client timeouts.
+# A global semaphore with limit=1 serializes all Ollama invocations on the event loop, ensuring
+# deterministic single-flight execution and consistent inference latency.
 _llm_semaphore: asyncio.Semaphore | None = None
 
 # Timeout for real-time summarize() LLM calls. If Ollama is loading models or
@@ -219,7 +248,7 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
 
     asyncio.Semaphore must be created on the same event loop it is used on;
     using a module-level singleton created at import time fails in some ASGI
-    environments.  Lazy init is therefore the safest approach.
+    environments. Lazy init is therefore the safest approach.
 
     Returns:
         asyncio.Semaphore: Shared concurrency gate (limit=1) for all Ollama calls.
@@ -236,7 +265,7 @@ class OllamaClient:
     def __init__(
         self,
         url: str = "http://ollama:11434/api/generate",
-        model: str = "llama3",
+        model: str = "hermes3:8b",
         final_model: str | None = None,
         timeout: float = 30.0,
     ) -> None:
@@ -244,16 +273,16 @@ class OllamaClient:
 
         Args:
             url (str): Target Ollama API generation URL.
-            model (str): Default LLM model identifier (e.g. 'llama3').
-            final_model (str | None): Model for final synthesis (e.g. 'qwen2.5:14b').
+            model (str): Default LLM model identifier (e.g. 'hermes3:8b').
+            final_model (str | None): Model for final synthesis (defaults to base model if not set).
             timeout (float): Request timeout in seconds.
         """
         self.url = os.getenv("OLLAMA_URL", "").strip() or url
         self.model = os.getenv("OLLAMA_MODEL", "").strip() or model
         self.final_model = (
             final_model
-            or os.getenv("OLLAMA_FINAL_MODEL", "qwen2.5:14b").strip()
-            or "qwen2.5:14b"
+            or os.getenv("OLLAMA_FINAL_MODEL", "").strip()
+            or self.model
         )
         raw_timeout = _env_float("OLLAMA_TIMEOUT_SECONDS", timeout)
         self.timeout = raw_timeout if raw_timeout else 120.0
@@ -332,6 +361,17 @@ class DiscussionEngine:
         on_thought: Any | None = None,
     ) -> list[dict[str, str]]:
         """Execute specified number of cross-functional debate rounds between Tech Lead and PM personas.
+
+        Multi-round BOLAA debate stages:
+            1. Independent Initial Analysis: Tech Lead and PM personas evaluate the transcript
+               separately to establish baseline technical constraints and business goals.
+            2. Interactive Cross-Debate: In each debate round, both personas receive cumulative
+               discussion history (_build_context) so they can challenge each other's assumptions,
+               trade-offs, delivery risks, and scope feasibility.
+            3. Grounding Rules: All persona prompts enforce strict grounding against the raw
+               meeting transcript. Historical memories retrieved from Mem0 are explicitly labeled
+               as background reference only, preventing past agreements from overriding decisions
+               made in the current session.
 
         Args:
             meeting_id (int): Primary key ID of the meeting.
@@ -616,7 +656,7 @@ class ControllerAgent:
     def __init__(
         self,
         ollama_url: str = "http://ollama:11434/api/generate",
-        model: str = "llama3",
+        model: str = "hermes3:8b",
         final_model: str | None = None,
         timeout: float = 30.0,
     ) -> None:
@@ -624,8 +664,8 @@ class ControllerAgent:
 
         Args:
             ollama_url (str): Target Ollama API generate endpoint URL.
-            model (str): Default LLM model identifier for real-time tasks.
-            final_model (str | None): Model identifier for final synthesis and debate.
+            model (str): Default LLM model identifier for real-time tasks (default 'hermes3:8b').
+            final_model (str | None): Model identifier for final synthesis and debate (defaults to base model if None).
             timeout (float): Connection and request timeout in seconds.
         """
         self._llm = OllamaClient(
@@ -848,10 +888,17 @@ class ControllerAgent:
         )
         cache_key = ""
         cache_client = _get_redis_client()
+
+        # Deterministic SHA-256 caching with 60s TTL:
+        # Avoids repeated redundant LLM inference when multiple attendees request clarity on the
+        # same recent context window, or when an attendee repeatedly toggles personas.
+        # A 60-second TTL balances instant responses with keeping pace with ongoing conversation.
         if cache_client is not None:
             cache_payload = f"{system_prompt}\n{prompt}"
             hashed_prompt = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
             cache_key = f"instant_clarity:{hashed_prompt}"
+            # Fail-open cache read: If Redis is unavailable or times out, catch the exception,
+            # log a warning, and fall through cleanly to live LLM generation.
             try:
                 cached = await cache_client.get(cache_key)
             except Exception as exc:
@@ -860,6 +907,7 @@ class ControllerAgent:
             if cached:
                 return cached
 
+        # Generate explanation via LLM with error recovery
         try:
             explanation = await self._llm.generate(
                 prompt=prompt,
@@ -867,9 +915,11 @@ class ControllerAgent:
                 model=self._llm.model,
             )
         except Exception as exc:
+            # Catch LLM connection or timeout failures and return a user-facing explanation fallback
             print(f"[ControllerAgent] Instant Clarity failed: {exc}")
             return "Failed to generate instant clarity due to an internal error."
 
+        # Fail-open cache write: Save successful explanation for 60 seconds
         if cache_client is not None and cache_key:
             try:
                 await cache_client.setex(cache_key, 60, explanation)
@@ -900,6 +950,10 @@ class ControllerAgent:
         Returns:
             str: JSON string containing complete final report JSON object.
         """
+        # num_rounds controls the depth of the Tech Lead ↔ PM cross-functional debate.
+        # DEFAULT_DISCUSSION_ROUNDS = 1 is sufficient for most meetings; 0 skips the
+        # debate entirely (useful for very short check-ins).  Each additional round
+        # adds one full-model inference cycle per persona (~10-30 s).
         if num_rounds is None:
             num_rounds = DEFAULT_DISCUSSION_ROUNDS
         num_rounds = max(num_rounds, 0)

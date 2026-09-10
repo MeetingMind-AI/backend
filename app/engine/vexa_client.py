@@ -1,15 +1,33 @@
+"""
+Vexa API Integration and Transcript Sync Engine Module.
+
+Vexa is a self-hosted meeting-bot platform that joins video calls (Google Meet, Zoom,
+Teams) via a browser-automation bot, captures audio, and exposes the resulting transcript
+through a REST API.  This module acts as the adapter between Vexa and MeetingMind.
+
+Key responsibilities:
+  - Polling Vexa's /meetings endpoint to track bot lifecycle state (running → completed).
+    Vexa does not push meeting-end events over WebSockets to server-side consumers;
+    it exposes a REST API that clients must poll.  The `monitor_meeting_until_terminal`
+    loop polls every `VEXA_MEETING_POLL_INTERVAL_SECONDS` (default 5 s) and triggers
+    finalization when the remote status transitions to 'completed' or the meeting
+    disappears from the Vexa meeting list across 2 consecutive polls.
+
+  - Polling transcript segments via `poll_transcripts_from_vexa`, which syncs updated
+    segments, deduplicates via SHA-256-like speaker|||text signatures, broadcasts new
+    chunks over WebSockets, and queues text for Ollama real-time summarization.
+
+  - Speaker sync with a progressive retry strategy (`sync_speakers_from_vexa`), because
+    participant rosters are finalized asynchronously after meeting end.
+
+  - Final canonical transcript sync (`sync_final_transcript_from_vexa`): replaces
+    live-captured chunks with Vexa's de-duplicated, speaker-diarized final segments.
+"""
+
 from __future__ import annotations
 import logging
 
 logger = logging.getLogger(__name__)
-
-"""
-Vexa API Integration and Transcript Sync Engine Module.
-
-Coordinates meeting lifecycle monitoring, remote Vexa bot status polling,
-transcript segment synchronization, speaker list extraction, real-time broadcast,
-and automatic final report generation upon meeting completion.
-"""
 
 
 import asyncio
@@ -39,12 +57,23 @@ TERMINAL_MEETING_STATUSES = {"completed", "failed"}
 FINALIZATION_PROGRESS_INTERVAL_SECONDS = 5
 SYSTEM_PARTICIPANT_NAMES = {"meeting audio"}
 
+# In-memory deduplication cache mapping meeting_id -> set of utterance signatures.
+# Because Vexa REST endpoints return the full accumulated transcript on every poll,
+# this cache allows calculating set differences (added_sigs = new_sigs - old_sigs)
+# so the engine only broadcasts new chunks over WebSockets and avoids redundant LLM work.
 _seen_chunk_sigs: dict[int, set[str]] = {}
+# Concurrency guard referencing shared finalizing_meetings to prevent race conditions
+# between background REST poller and incoming Vexa webhook lifecycle events.
 _finalizing = finalizing_meetings
 
 
 def _get_chunk_sigs(meeting_id: int) -> set[str]:
     """Generate deduplication signature strings for existing meeting transcript chunks.
+
+    Utterance signature mechanism:
+        Forms an immutable string composite '{speaker}|||{text.strip()}' for every persisted chunk.
+        During live polling, newly fetched segments are compared against this set to identify
+        genuinely new utterances, filtering out previously synced chunks without full table scans.
 
     Args:
         meeting_id (int): Target meeting primary key ID.
@@ -200,6 +229,9 @@ async def _finalize_completed_meeting(
     api_key: str,
     source: str,
 ) -> None:
+    # Atomic in-memory concurrency gate: Both monitor_meeting_until_terminal (REST poller)
+    # and /api/vexa/webhook can report meeting completion concurrently. Checking and adding
+    # to _finalizing prevents double finalization and redundant Ollama synthesis runs.
     if meeting_id in _finalizing:
         logger.info(f"[Vexa] Finalization already in progress for meeting {meeting_id}; skipping ({source})")
         return
@@ -411,6 +443,9 @@ def _filter_speakers(raw: list[Any]) -> list[str]:
     Returns:
         list[str]: Filtered participant name strings.
     """
+    # SYSTEM_PARTICIPANT_NAMES contains entries like 'meeting audio' — a virtual
+    # participant that Vexa injects to represent the aggregated room audio track.
+    # It has no real identity and must be stripped before persisting the speaker list.
     return [
         name for p in raw
         if (name := str(p).strip()) and name.lower() not in SYSTEM_PARTICIPANT_NAMES
@@ -439,6 +474,12 @@ async def sync_speakers_from_vexa(
         return []
 
     base_url = _vexa_api_base_url()
+    # Progressive retry backoff (2s -> 8s -> 20s):
+    # Remote conferencing platforms (Google Meet, Zoom, Teams) and Vexa's diarization service
+    # finalize participant rosters asynchronously. Immediately upon meeting conclusion,
+    # participant metadata queries often return empty lists or only generic system audio.
+    # Exponential backoff gives Vexa adequate time to aggregate participant identities without
+    # overloading the gateway, terminating early as soon as real participants are resolved.
     delays = [2, 8, 20]
 
     for attempt, delay in enumerate(delays, start=1):
@@ -670,6 +711,10 @@ async def monitor_meeting_until_terminal(
             payload, platform, native_id, vexa_remote_id=vexa_remote_id
         )
         if not remote_meeting:
+            # Consecutive disappearance heuristic: If a meeting was previously seen in Vexa
+            # but disappears from the /meetings list across 2+ consecutive poll cycles,
+            # Vexa has purged the active bot session upon meeting conclusion. We treat this as
+            # an implicit transition to 'completed' and trigger background finalization.
             if seen_in_vexa:
                 consecutive_not_found += 1
                 logger.info(
@@ -700,6 +745,8 @@ async def monitor_meeting_until_terminal(
         if status_value:
             update_meeting_status(meeting_id, status_value)
 
+        # Terminal status transitions: 'completed' and 'failed' terminate the monitoring loop.
+        # Only 'completed' triggers canonical transcript sync, speaker extraction, and AI report generation.
         if status_value in TERMINAL_MEETING_STATUSES:
             if status_value == "completed":
                 await _finalize_completed_meeting(
@@ -752,6 +799,10 @@ async def poll_transcripts_from_vexa(
         team_id = meeting.team_id if meeting else None
         team_prompts = get_team_prompts(team_id, db)
 
+    # Producer-consumer queue: Transcript polling runs every 3s, whereas Ollama LLM
+    # inference may take 2-8s per prompt. To avoid queue pile-up and Ollama thread thrashing,
+    # the summary worker drains all accumulated chunks currently in the queue into a single
+    # concatenated batch before invoking controller.summarize().
     summary_queue = asyncio.Queue()
 
     async def _summary_worker():
@@ -860,6 +911,8 @@ async def poll_transcripts_from_vexa(
 
     worker_task = asyncio.create_task(_summary_worker())
 
+    # Polling loop continues until meeting reaches a terminal status ('completed' or 'failed').
+    # Once terminal, cleanly cancels the summary worker task to prevent dangling background coroutines.
     while not await _is_local_meeting_terminal(meeting_id):
         try:
             old_sigs = _seen_chunk_sigs.get(meeting_id, set())

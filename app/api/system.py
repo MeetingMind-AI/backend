@@ -82,7 +82,11 @@ async def _check_ollama(client: httpx.AsyncClient) -> dict[str, Any]:
         except Exception:
             pass
 
-        # Fetch actively loaded models in RAM/VRAM
+        # /api/ps reveals which models are actively loaded in memory right now.
+        # Unlike /api/tags (which lists installed models), /api/ps shows actual
+        # VRAM / RAM footprint and expiry timers — useful for diagnosing whether
+        # Ollama is idle (no loaded models), CPU-only (size_vram == 0), or GPU-
+        # accelerated (size_vram > 0).
         running_models: list[dict[str, Any]] = []
         has_vram_allocation = False
         try:
@@ -229,10 +233,15 @@ async def get_system_status() -> dict[str, Any]:
         qdrant_task = _check_qdrant(client)
         stt_task = _check_stt(client)
 
+        # All five checks run concurrently via asyncio.gather so that a single
+        # slow or offline service does not add its timeout to the others.
+        # Individual check functions cap their own timeouts at 2-3 s.
         ollama_res, db_res, redis_res, qdrant_res, stt_res = await asyncio.gather(
             ollama_task, db_task, redis_task, qdrant_task, stt_task
         )
 
+    # 'ok' is true only when the three services that are required for any inference
+    # request are all online.  Qdrant and STT are optional/degraded-mode services.
     all_critical_online = bool(
         ollama_res.get("online")
         and db_res.get("online")

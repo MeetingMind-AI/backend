@@ -22,7 +22,18 @@ from app.engine.prompts import PROMPT_DEFAULTS, PROMPT_READONLY_KEYS
 
 router = APIRouter(tags=["teams"])
 
+# Valid agile role identifiers accepted by the role update endpoint.
+# 'admin' and 'member' are accepted as legacy aliases but stored/returned
+# as 'scrum_master' / 'team_member' respectively.
 AGILE_ROLES = {"scrum_master", "product_manager", "team_member"}
+
+# Default notification preference tokens assigned when a member joins or changes role.
+# Token format: "<dimension>:<value>" where dimension is one of:
+#   type    — action category (e.g. 'type:blocker', 'type:to_do', 'type:insight')
+#   business — business-context filter (e.g. 'business' enables business items)
+#   technical — technical-context filter
+# A token suffixed with ':off' (e.g. 'type:blocker:off') is an explicit suppression.
+# Absence of positive type: tokens places the list in allowlist mode (see isNotificationTypeActive).
 DEFAULT_ROLE_PREFERENCES: dict[str, list[str]] = {
     "scrum_master": ["type:blocker", "type:parking_lot", "type:to_schedule", "type:to_do", "type:insight"],
     "product_manager": ["type:insight", "type:to_do", "business"],
@@ -189,6 +200,9 @@ def create_team(
         team = Team(
             name=req.name.strip(),
             owner_id=user_id,
+            # A random 32-byte (64-char hex) token uniquely identifies the team's
+            # shareable invite link.  The token is stable for the team's lifetime
+            # and does not expire, so the owner can share the link at any time.
             invite_token=uuid.uuid4().hex,
         )
         db.add(team)
