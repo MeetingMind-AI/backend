@@ -149,6 +149,15 @@ class TeamUpdateRequest(BaseModel):
     name: str
 
 
+class TransferOwnershipRequest(BaseModel):
+    """Transfer Team Ownership Request Schema.
+
+    Attributes:
+        new_owner_id (int): User ID of the new team owner.
+    """
+    new_owner_id: int
+
+
 @router.get("/api/teams")
 def list_teams(user_id: int = Depends(get_current_user_id)) -> dict[str, Any]:
     """List all teams that the current authenticated user belongs to.
@@ -332,6 +341,81 @@ def leave_team(
         if membership:
             db.delete(membership)
             db.commit()
+        return {"ok": True}
+
+
+@router.post("/api/teams/{team_id}/transfer-ownership")
+def transfer_team_ownership(
+    team_id: int,
+    req: TransferOwnershipRequest,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Transfer ownership of a team to another existing member.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        req (TransferOwnershipRequest): Payload with target new owner's user ID.
+        user_id (int): Authenticated user ID (must be current owner).
+
+    Returns:
+        dict[str, Any]: Success response with updated owner_id.
+
+    Raises:
+        HTTPException: 403 if caller is not owner, 400 if self-transfer or target not in team.
+    """
+    with SessionLocal() as db:
+        team = _assert_owner(db, user_id, team_id)
+        if req.new_owner_id == user_id:
+            raise HTTPException(
+                status_code=400, detail="You are already the owner of this team"
+            )
+
+        new_owner_membership = db.execute(
+            select(TeamMembership).where(
+                TeamMembership.user_id == req.new_owner_id,
+                TeamMembership.team_id == team_id,
+            )
+        ).scalar_one_or_none()
+        if not new_owner_membership:
+            raise HTTPException(
+                status_code=400, detail="The selected user must be a member of the team"
+            )
+
+        team.owner_id = req.new_owner_id
+        db.commit()
+        return {"ok": True, "team_id": team.id, "owner_id": team.owner_id}
+
+
+@router.delete("/api/teams/{team_id}")
+def delete_team(
+    team_id: int,
+    user_id: int = Depends(get_current_user_id),
+) -> dict[str, Any]:
+    """Permanently delete a team and all associated meetings, topics, and memberships.
+
+    Args:
+        team_id (int): Target team primary key ID.
+        user_id (int): Authenticated user ID (must be team owner).
+
+    Returns:
+        dict[str, Any]: Success confirmation.
+
+    Raises:
+        HTTPException: 403 if caller is not owner, 404 if team not found.
+    """
+    with SessionLocal() as db:
+        team = _assert_owner(db, user_id, team_id)
+
+        # Explicitly delete all meetings associated with this team so their
+        # transcript_chunks and agent_actions cascade cleanly.
+        meetings = db.execute(
+            select(Meeting).where(Meeting.team_id == team_id)
+        ).scalars().all()
+        for m in meetings:
+            db.delete(m)
+
+        db.delete(team)
+        db.commit()
         return {"ok": True}
 
 

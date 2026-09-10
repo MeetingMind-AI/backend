@@ -62,7 +62,9 @@ Final meeting reports are generated through a 3-stage agentic workflow:
 - `POST /api/teams` — Create team (caller assigned as owner).
 - `GET /api/teams/{team_id}` — Team details with members and topics.
 - `PATCH /api/teams/{team_id}` — Rename team (owner only).
-- `POST /api/teams/{team_id}/leave` — Leave team (owner cannot leave).
+- `POST /api/teams/{team_id}/transfer-ownership` — Transfer team ownership to another active member (owner only).
+- `DELETE /api/teams/{team_id}` — Permanently delete team and cascade-delete all meetings, transcripts, actions, topics, and memberships (owner only).
+- `POST /api/teams/{team_id}/leave` — Leave team (owner cannot leave without transferring ownership or deleting team).
 - `GET /api/teams/{team_id}/invite` — Generate/fetch team invite link (owner only).
 - `POST /api/teams/join/{invite_token}` — Join team using invite token.
 - `GET /api/teams/{team_id}/members` — List all members and roles.
