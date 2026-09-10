@@ -31,6 +31,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.auth import router as auth_router
 from app.api.deps import get_current_user_id
+from app.api.system import router as system_router
 from app.api.teams import router as teams_router
 from app.api.websockets import router as websocket_router
 from app.api.ws_manager import manager
@@ -103,6 +104,7 @@ app = FastAPI(title="MeetingMind AI Backend", lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(teams_router)
 app.include_router(websocket_router)
+app.include_router(system_router)
 
 
 # ── request models ────────────────────────────────────────────────────────────
@@ -116,20 +118,24 @@ class MeetingStartRequest(BaseModel):
         native_id (str): Native meeting URL or code string.
         team_id (int | None): Optional team workspace ID.
         passcode (str | None): Optional meeting passcode.
+        meeting_type (str): Agile meeting mode ('general', 'daily_standup', 'sprint_planning').
     """
     platform: str = Field(min_length=1)
     native_id: str = Field(min_length=1)
     team_id: int | None = None
     passcode: str | None = None
+    meeting_type: str = "general"
 
 
 class MeetingRenameRequest(BaseModel):
-    """Meeting Rename Request Schema.
+    """Meeting Rename and Mode Update Request Schema.
 
     Attributes:
-        title (str): New title string for the meeting (1-255 characters).
+        title (str | None): Optional new title string for the meeting (1-255 characters).
+        meeting_type (str | None): Optional new meeting mode ('general', 'daily_standup', 'sprint_planning').
     """
-    title: str = Field(min_length=1, max_length=255)
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    meeting_type: str | None = None
 
 
 class ClarityRequest(BaseModel):
@@ -192,7 +198,7 @@ def _check_can_edit_meeting(db: Any, user_id: int, meeting: Meeting) -> bool:
                 TeamMembership.team_id == meeting.team_id,
             )
         ).scalar_one_or_none()
-        if membership and membership.role in {"admin", "owner"}:
+        if membership and membership.role in {"admin", "owner", "scrum_master"}:
             return True
         return False
     else:
@@ -307,7 +313,7 @@ async def start_meeting(
     request: MeetingStartRequest,
     background_tasks: BackgroundTasks,
     user_id: int = Depends(get_current_user_id),
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Deploy Vexa transcription bot and initiate background polling tasks for a new meeting.
 
     Args:
@@ -316,7 +322,7 @@ async def start_meeting(
         user_id (int): Authenticated user ID.
 
     Returns:
-        dict[str, int]: Dictionary containing generated local `meeting_id`.
+        dict[str, Any]: Dictionary containing generated local `meeting_id` and `meeting_type`.
 
     Raises:
         HTTPException: 500/502 for Vexa deployment errors or DB failures.
@@ -382,10 +388,14 @@ async def start_meeting(
             and str(existing.status or "").strip().lower() in {"completed", "failed"}
         )
 
+        m_type = (request.meeting_type or "general").strip().lower()
+        if m_type == "sprint":
+            m_type = "sprint_planning"
         if existing and not existing_is_terminal:
             # Reuse an in-progress meeting (e.g. reconnect / duplicate request)
             existing.status = status
             existing.title = title
+            existing.meeting_type = m_type
             meeting = existing
         else:
             # Either no existing record, OR the existing one is already completed/failed.
@@ -403,6 +413,7 @@ async def start_meeting(
                 vexa_meeting_id=local_vexa_id,
                 title=title,
                 status=status,
+                meeting_type=m_type,
                 team_id=request.team_id,
                 created_by=user_id,
             )
@@ -437,7 +448,7 @@ async def start_meeting(
         )
 
     background_tasks.add_task(run_meeting_tasks)
-    return {"meeting_id": meeting.id}
+    return {"meeting_id": meeting.id, "meeting_type": meeting.meeting_type}
 
 
 @app.post("/api/meetings/{meeting_id}/leave")
@@ -769,6 +780,7 @@ def list_meetings(
                 "id": m.id,
                 "title": m.title,
                 "status": m.status,
+                "meeting_type": getattr(m, "meeting_type", "general") or "general",
                 "summary": m.summary,
                 "is_summarizing": is_summarizing,
                 "summarizing_started_at": summary_starts.get(m.id),
@@ -816,6 +828,7 @@ def get_meeting(
             "id": meeting.id,
             "title": meeting.title,
             "status": meeting.status,
+            "meeting_type": getattr(meeting, "meeting_type", "general") or "general",
             "summary": meeting.summary,
             "is_summarizing": is_summarizing,
             "summarizing_started_at": summary_starts.get(meeting.id),
@@ -835,15 +848,15 @@ def update_meeting(
     request: MeetingRenameRequest,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
-    """Update title of a meeting record.
+    """Update title and/or meeting mode of a meeting record.
 
     Args:
         meeting_id (int): Primary key ID of meeting.
-        request (MeetingRenameRequest): Payload with new title string.
+        request (MeetingRenameRequest): Payload with optional title and meeting_type.
         user_id (int): Authenticated user ID.
 
     Returns:
-        dict[str, Any]: Updated meeting title dictionary.
+        dict[str, Any]: Updated meeting metadata dictionary.
     """
     with SessionLocal() as db:
         meeting = db.get(Meeting, meeting_id)
@@ -852,15 +865,22 @@ def update_meeting(
         if meeting.team_id:
             _assert_member(db, user_id, meeting.team_id)
         _assert_can_edit_meeting(db, user_id, meeting)
-        meeting.title = request.title
+        if request.title is not None:
+            meeting.title = request.title.strip()
+        if request.meeting_type is not None:
+            m_type = request.meeting_type.strip().lower()
+            if m_type == "sprint":
+                m_type = "sprint_planning"
+            meeting.meeting_type = m_type
         try:
             db.commit()
+            db.refresh(meeting)
         except SQLAlchemyError as exc:
             db.rollback()
             raise HTTPException(
                 status_code=500, detail=f"Failed to update meeting: {exc}"
             ) from exc
-    return {"ok": True, "title": request.title}
+    return {"ok": True, "title": meeting.title, "meeting_type": meeting.meeting_type}
 
 
 @app.delete("/api/meetings/{meeting_id}")
@@ -1494,7 +1514,7 @@ class ActionReviewRequest(BaseModel):
     status: str | None = Field(default=None, pattern="^(accepted|rejected|pending|archived)$")
     content: str | None = None
     assignee_id: int | None = None
-    action_type: str | None = Field(default=None, pattern="^(parking_lot|to_do|to_schedule)$")
+    action_type: str | None = Field(default=None, pattern="^(parking_lot|to_do|to_schedule|blocker)$")
     tags: list[str] | None = None
 
 
@@ -1588,7 +1608,7 @@ class ActionCreateRequest(BaseModel):
         assignee_id (int | None): Optional assigned user ID.
         tags (list[str] | None): Optional list of tags.
     """
-    action_type: str = Field(pattern="^(parking_lot|to_do|to_schedule)$")
+    action_type: str = Field(pattern="^(parking_lot|to_do|to_schedule|blocker)$")
     content: str
     assignee_id: int | None = None
     status: str = Field(default="accepted", pattern="^(accepted|pending|rejected)$")

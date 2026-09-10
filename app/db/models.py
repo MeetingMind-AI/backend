@@ -143,7 +143,7 @@ class Team(Base):
 class TeamMembership(Base):
     """Team Membership ORM Model.
 
-    Junction table linking Users to Teams, tracking roles (e.g., owner, admin, member)
+    Junction table linking Users to Teams, tracking roles (scrum_master, product_manager, team_member)
     and notification tag preferences for action items.
     """
 
@@ -160,7 +160,7 @@ class TeamMembership(Base):
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default=sa_text("'member'"))
+    role: Mapped[str] = mapped_column(String(50), nullable=False, server_default=sa_text("'team_member'"))
     notification_preferences: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="memberships")
@@ -184,6 +184,9 @@ class Meeting(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(
         String(64), nullable=False, server_default=sa_text("'pending'")
+    )
+    meeting_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default=sa_text("'general'"), default="general"
     )
     summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     discussion_log: Mapped[list | None] = mapped_column(JSONB, nullable=True)

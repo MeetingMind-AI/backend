@@ -22,6 +22,13 @@ from app.engine.prompts import PROMPT_DEFAULTS, PROMPT_READONLY_KEYS
 
 router = APIRouter(tags=["teams"])
 
+AGILE_ROLES = {"scrum_master", "product_manager", "team_member"}
+DEFAULT_ROLE_PREFERENCES: dict[str, list[str]] = {
+    "scrum_master": ["type:blocker", "type:parking_lot", "type:to_schedule", "type:to_do", "type:insight"],
+    "product_manager": ["type:insight", "type:to_do", "business"],
+    "team_member": ["type:to_do", "technical"],
+}
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -79,13 +86,18 @@ def _member_out(user: User, membership: TeamMembership) -> dict[str, Any]:
     Returns:
         dict[str, Any]: Formatted member attributes dictionary.
     """
+    role = membership.role or "team_member"
+    prefs = membership.notification_preferences
+    if prefs is None:
+        role_key = role if role in DEFAULT_ROLE_PREFERENCES else ("scrum_master" if role == "admin" else "team_member")
+        prefs = list(DEFAULT_ROLE_PREFERENCES.get(role_key, DEFAULT_ROLE_PREFERENCES["team_member"]))
     return {
         "id": user.id,
         "name": user.name,
         "email": user.email,
         "photo_url": f"/api/auth/photo/{user.id}" if user.photo else None,
-        "role": membership.role,
-        "notification_preferences": membership.notification_preferences or [],
+        "role": role,
+        "notification_preferences": prefs,
     }
 
 
@@ -184,8 +196,8 @@ def create_team(
         db.add(TeamMembership(
             user_id=user_id,
             team_id=team.id,
-            role="admin",
-            notification_preferences=["technical", "business"]
+            role="scrum_master",
+            notification_preferences=list(DEFAULT_ROLE_PREFERENCES["scrum_master"]),
         ))
         db.commit()
         db.refresh(team)
@@ -372,7 +384,12 @@ def join_team(
             )
         ).scalar_one_or_none()
         if not already:
-            db.add(TeamMembership(user_id=user_id, team_id=team.id))
+            db.add(TeamMembership(
+                user_id=user_id,
+                team_id=team.id,
+                role="team_member",
+                notification_preferences=list(DEFAULT_ROLE_PREFERENCES["team_member"]),
+            ))
             db.commit()
         return {"team_id": team.id, "team_name": team.name}
 
@@ -456,52 +473,46 @@ def update_member(
     req: TeamMemberUpdate,
     user_id: int = Depends(get_current_user_id),
 ) -> dict[str, Any]:
-    """Update team member role.
+    """Update team member role or notification preferences.
 
     Args:
         team_id (int): Target team primary key ID.
         target_user_id (int): User ID of member being updated.
-        req (TeamMemberUpdate): Payload containing role.
+        req (TeamMemberUpdate): Payload containing role and/or notification preferences.
         user_id (int): Authenticated user ID.
 
     Returns:
         dict[str, Any]: Updated member object.
 
     Raises:
-        HTTPException: 403 if non-owner attempts to update role.
+        HTTPException: 403 if non-owner attempts to update role or someone else's preferences.
     """
     with SessionLocal() as db:
         _assert_member(db, user_id, team_id)
         team = db.get(Team, team_id)
         if not team:
             raise HTTPException(status_code=404, detail="Team not found")
-        
+
+        is_owner = team.owner_id == user_id
+        is_self = target_user_id == user_id
+
         # Only owners can change roles
-        if req.role is not None and team.owner_id != user_id:
-            raise HTTPException(status_code=403, detail="Only team owners can change roles")
-            
-        # Only the user or owner can change notification preferences.
-        # However, notification *type* preferences (keys containing "type:") are
-        # exclusively controlled by the team owner — members cannot set them for
-        # themselves or others.
+        if req.role is not None:
+            if not is_owner:
+                raise HTTPException(status_code=403, detail="Only team owners can change roles")
+            if req.role not in AGILE_ROLES and req.role not in {"admin", "member"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid role. Must be one of: {', '.join(sorted(AGILE_ROLES))}",
+                )
+
+        # Users can update their own notification preferences; owners can update any member's preferences
         if req.notification_preferences is not None:
-            is_owner = team.owner_id == user_id
-            if not is_owner and target_user_id != user_id:
+            if not is_owner and not is_self:
                 raise HTTPException(
                     status_code=403,
                     detail="Only the team owner can change notification preferences for other members",
                 )
-            if not is_owner:
-                # Non-owner can only change topic preferences, not type-gated prefs
-                type_prefs_requested = [
-                    p for p in req.notification_preferences
-                    if "type:" in p
-                ]
-                if type_prefs_requested:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Only the team owner can manage notification type permissions",
-                    )
 
         membership = db.execute(
             select(TeamMembership).where(
@@ -509,18 +520,28 @@ def update_member(
                 TeamMembership.team_id == team_id,
             )
         ).scalar_one_or_none()
-        
+
         if not membership:
             raise HTTPException(status_code=404, detail="Member not found")
-            
+
         if req.role is not None:
             membership.role = req.role
-        
+            # Automatically refresh default notification preferences if not explicitly overridden
+            if req.notification_preferences is None:
+                role_key = (
+                    req.role
+                    if req.role in DEFAULT_ROLE_PREFERENCES
+                    else ("scrum_master" if req.role == "admin" else "team_member")
+                )
+                membership.notification_preferences = list(
+                    DEFAULT_ROLE_PREFERENCES.get(role_key, [])
+                )
+
         if req.notification_preferences is not None:
             membership.notification_preferences = req.notification_preferences
-            
+
         db.commit()
-        
+
         u = db.get(User, target_user_id)
         return {**_member_out(u, membership), "is_owner": u.id == team.owner_id}
 

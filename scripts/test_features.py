@@ -327,6 +327,172 @@ class TestMeetingMindFeatures(unittest.TestCase):
         self.assertEqual(photo_res.status_code, 200)
         self.assertEqual(photo_res.content, b"fake-image-bytes")
 
+    def test_meeting_type_modes(self):
+        """Verify meeting_type is saved and returned across meeting endpoints."""
+        # 1. Existing meeting in setUp defaults to 'general'
+        res = self.client.get(
+            "/api/meetings/1",
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json().get("meeting_type"), "general")
+
+        # 2. list_meetings returns meeting_type
+        list_res = self.client.get(
+            "/api/meetings?team_id=1",
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(list_res.status_code, 200)
+        meetings = list_res.json().get("meetings", [])
+        self.assertTrue(any(m["id"] == 1 and m["meeting_type"] == "general" for m in meetings))
+
+        # 3. start_meeting persists custom meeting_type (e.g. daily_standup)
+        with patch("httpx.AsyncClient.post") as mock_post:
+            mock_post.return_value = MagicMock(
+                status_code=200,
+                content=b'{"id": "vexa-standup-1", "title": "Daily Standup"}',
+                json=lambda: {"id": "vexa-standup-1", "title": "Daily Standup"},
+                raise_for_status=lambda: None,
+            )
+            with patch.dict("os.environ", {"VEXA_API_KEY": "fake-key"}):
+                start_res = self.client.post(
+                    "/api/meetings/start",
+                    json={
+                        "platform": "google_meet",
+                        "native_id": "standup-room-1",
+                        "team_id": 1,
+                        "meeting_type": "daily_standup",
+                    },
+                    cookies={"mm_session": "admin-token"},
+                )
+                self.assertEqual(start_res.status_code, 200, start_res.text)
+                self.assertEqual(start_res.json().get("meeting_type"), "daily_standup")
+                new_id = start_res.json()["meeting_id"]
+
+        get_res = self.client.get(
+            f"/api/meetings/{new_id}",
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(get_res.status_code, 200)
+        self.assertEqual(get_res.json().get("meeting_type"), "daily_standup")
+
+        # 4. update_meeting can update meeting_type
+        patch_res = self.client.patch(
+            f"/api/meetings/{new_id}",
+            json={"meeting_type": "sprint"},
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(patch_res.status_code, 200)
+        self.assertEqual(patch_res.json().get("meeting_type"), "sprint_planning")
+
+        # 5. create action with action_type='blocker'
+        action_res = self.client.post(
+            f"/api/meetings/{new_id}/actions",
+            json={"action_type": "blocker", "content": "Database migration locked"},
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(action_res.status_code, 200, action_res.text)
+
+        # 6. list_actions returns blocker under "blocker"
+        actions_list = self.client.get(
+            f"/api/meetings/{new_id}/actions",
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(actions_list.status_code, 200)
+        actions_data = actions_list.json()
+        self.assertIn("blocker", actions_data)
+        self.assertTrue(any(a["content"] == "Database migration locked" for a in actions_data["blocker"]["accepted"]))
+
+    def test_agile_roles_and_preferences(self):
+        """Verify Agile roles creation, joining, updating, and self notification preferences."""
+        from app.api.teams import DEFAULT_ROLE_PREFERENCES
+
+        # 1. Create team assigns creator scrum_master with default preferences
+        team_res = self.client.post(
+            "/api/teams",
+            json={"name": "Agile Alpha"},
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(team_res.status_code, 200, team_res.text)
+        team_id = team_res.json()["id"]
+
+        members_res = self.client.get(
+            f"/api/teams/{team_id}/members",
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(members_res.status_code, 200)
+        creator_m = next(m for m in members_res.json()["members"] if m["id"] == 1)
+        self.assertEqual(creator_m["role"], "scrum_master")
+        self.assertEqual(creator_m["notification_preferences"], DEFAULT_ROLE_PREFERENCES["scrum_master"])
+
+        # 2. Member joins team: assigned team_member with team_member preferences
+        team_obj = self.db.get(Team, team_id)
+        join_res = self.client.post(
+            f"/api/teams/join/{team_obj.invite_token}",
+            cookies={"mm_session": "member-token"},
+        )
+        self.assertEqual(join_res.status_code, 200)
+
+        members_res = self.client.get(
+            f"/api/teams/{team_id}/members",
+            cookies={"mm_session": "admin-token"},
+        )
+        member_m = next(m for m in members_res.json()["members"] if m["id"] == 2)
+        self.assertEqual(member_m["role"], "team_member")
+        self.assertEqual(member_m["notification_preferences"], DEFAULT_ROLE_PREFERENCES["team_member"])
+
+        # 3. Owner updates member role to product_manager -> auto-refreshes preferences
+        update_role_res = self.client.patch(
+            f"/api/teams/{team_id}/members/2",
+            json={"role": "product_manager"},
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(update_role_res.status_code, 200, update_role_res.text)
+        self.assertEqual(update_role_res.json()["role"], "product_manager")
+        self.assertEqual(update_role_res.json()["notification_preferences"], DEFAULT_ROLE_PREFERENCES["product_manager"])
+
+        # 4. Non-owner member can update their OWN notification preferences without 403
+        self_update_res = self.client.patch(
+            f"/api/teams/{team_id}/members/2",
+            json={"notification_preferences": ["type:blocker", "type:parking_lot:off"]},
+            cookies={"mm_session": "member-token"},
+        )
+        self.assertEqual(self_update_res.status_code, 200, self_update_res.text)
+        self.assertEqual(self_update_res.json()["notification_preferences"], ["type:blocker", "type:parking_lot:off"])
+
+        # 5. Non-owner member CANNOT update other member's preferences (HTTP 403)
+        other_update_res = self.client.patch(
+            f"/api/teams/{team_id}/members/1",
+            json={"notification_preferences": ["type:to_do"]},
+            cookies={"mm_session": "member-token"},
+        )
+        self.assertEqual(other_update_res.status_code, 403)
+
+        # 6. Non-owner member CANNOT update roles (HTTP 403)
+        role_forbidden_res = self.client.patch(
+            f"/api/teams/{team_id}/members/2",
+            json={"role": "scrum_master"},
+            cookies={"mm_session": "member-token"},
+        )
+        self.assertEqual(role_forbidden_res.status_code, 403)
+
+        # 7. Invalid role is rejected with HTTP 400
+        invalid_role_res = self.client.patch(
+            f"/api/teams/{team_id}/members/2",
+            json={"role": "superman"},
+            cookies={"mm_session": "admin-token"},
+        )
+        self.assertEqual(invalid_role_res.status_code, 400)
+
+    def test_scrum_master_edit_authorization(self):
+        """Verify scrum_master role grants meeting edit permissions in _check_can_edit_meeting."""
+        # Add user 3 as scrum_master in team 1
+        self.db.add(TeamMembership(user_id=3, team_id=1, role="scrum_master"))
+        self.db.commit()
+
+        can_edit = _check_can_edit_meeting(self.db, 3, self.meeting)
+        self.assertTrue(can_edit)
+
 
 if __name__ == "__main__":
     unittest.main()
