@@ -27,7 +27,7 @@ The backend uses a REST polling strategy to fetch canonical speech segments from
 - **Producer-Consumer Batching Queue:** A background `_summary_worker` drains all queued transcript segments via `asyncio.Queue.get_nowait()`, batching them into a single consolidated prompt to prevent queue pile-up and protect Ollama from concurrency overload.
 
 ### 2. Progressive Speaker Retry
-When a meeting terminates, remote conferencing providers (Google Meet, Zoom, MS Teams) and Vexa asynchronously finalize attendee identities and diarization:
+When a meeting terminates, remote conferencing providers (Google Meet, MS Teams) and Vexa asynchronously finalize attendee identities and diarization:
 - `sync_speakers_from_vexa` executes progressive exponential backoff delays: **2s → 8s → 20s**.
 - Halts immediately as soon as a non-empty list of attendees is retrieved, filtering out system audio entries (e.g. `'meeting audio'`).
 

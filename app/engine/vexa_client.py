@@ -1,7 +1,7 @@
 """
 Vexa API Integration and Transcript Sync Engine Module.
 
-Vexa is a self-hosted meeting-bot platform that joins video calls (Google Meet, Zoom,
+Vexa is a self-hosted meeting-bot platform that joins video calls (Google Meet,
 Teams) via a browser-automation bot, captures audio, and exposes the resulting transcript
 through a REST API.  This module acts as the adapter between Vexa and MeetingMind.
 
@@ -475,7 +475,7 @@ async def sync_speakers_from_vexa(
 
     base_url = _vexa_api_base_url()
     # Progressive retry backoff (2s -> 8s -> 20s):
-    # Remote conferencing platforms (Google Meet, Zoom, Teams) and Vexa's diarization service
+    # Remote conferencing platforms (Google Meet, Microsoft Teams) and Vexa's diarization service
     # finalize participant rosters asynchronously. Immediately upon meeting conclusion,
     # participant metadata queries often return empty lists or only generic system audio.
     # Exponential backoff gives Vexa adequate time to aggregate participant identities without

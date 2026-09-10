@@ -114,7 +114,7 @@ class MeetingStartRequest(BaseModel):
     """Meeting Start Request Schema.
 
     Attributes:
-        platform (str): Meeting platform identifier (e.g. 'google_meet', 'teams', 'zoom').
+        platform (str): Meeting platform identifier (e.g. 'google_meet', 'teams').
         native_id (str): Native meeting URL or code string.
         team_id (int | None): Optional team workspace ID.
         passcode (str | None): Optional meeting passcode.
