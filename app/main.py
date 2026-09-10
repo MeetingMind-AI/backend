@@ -93,6 +93,33 @@ async def lifespan(app: FastAPI):
                     UPDATE meetings SET speakers = participants WHERE speakers IS NULL AND participants IS NOT NULL;
                     ALTER TABLE meetings DROP COLUMN participants;
                 END IF;
+
+                -- Automatically synchronize all Postgres primary key sequences with MAX(id)
+                -- Prevents duplicate key violation on restarted/seeded databases
+                DECLARE
+                    r RECORD;
+                    max_id BIGINT;
+                BEGIN
+                    FOR r IN (
+                        SELECT
+                            s.relname AS seq_name,
+                            t.relname AS tab_name,
+                            a.attname AS col_name
+                        FROM pg_class s
+                        JOIN pg_depend d ON d.objid = s.oid
+                        JOIN pg_class t ON d.refobjid = t.oid
+                        JOIN pg_attribute a ON d.refobjid = a.attrelid AND d.refobjsubid = a.attnum
+                        JOIN pg_namespace n ON n.oid = s.relnamespace
+                        WHERE s.relkind = 'S' AND n.nspname = 'public'
+                    ) LOOP
+                        EXECUTE format('SELECT COALESCE(MAX(%I), 0) FROM %I', r.col_name, r.tab_name) INTO max_id;
+                        IF max_id > 0 THEN
+                            EXECUTE format('SELECT setval(%L, %s, true)', r.seq_name, max_id);
+                        ELSE
+                            EXECUTE format('SELECT setval(%L, 1, false)', r.seq_name);
+                        END IF;
+                    END LOOP;
+                END;
             END $$;
         """))
         conn.commit()
@@ -355,6 +382,7 @@ async def start_meeting(
     headers = {"X-API-Key": vexa_api_key, "Content-Type": "application/json"}
 
     try:
+        deployed: dict[str, Any] = {}
         async with httpx.AsyncClient(timeout=30.0) as client:
             vexa_api_url = os.getenv("VEXA_API_URL", "http://gateway:8000/bots")
             bot_response = await client.post(
@@ -362,9 +390,23 @@ async def start_meeting(
                 json=bot_payload,
                 headers=headers,
             )
-        bot_response.raise_for_status()
-        raw: Any = bot_response.json() if bot_response.content else {}
-        deployed: dict[str, Any] = raw if isinstance(raw, dict) else {}
+            if bot_response.status_code == 409:
+                # Active bot already exists in Vexa for this call. Adopt the existing meeting.
+                base_vexa = vexa_api_url.rsplit("/bots", 1)[0]
+                m_list_resp = await client.get(f"{base_vexa}/meetings", headers=headers)
+                if m_list_resp.status_code == 200:
+                    for m in m_list_resp.json().get("meetings", []):
+                        if (
+                            str(m.get("platform")) == request.platform
+                            and str(m.get("native_meeting_id")) == request.native_id
+                            and str(m.get("status", "")).lower() in {"active", "requested", "joining"}
+                        ):
+                            deployed = m
+                            break
+            if not deployed:
+                bot_response.raise_for_status()
+                raw: Any = bot_response.json() if bot_response.content else {}
+                deployed = raw if isinstance(raw, dict) else {}
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=exc.response.status_code,
